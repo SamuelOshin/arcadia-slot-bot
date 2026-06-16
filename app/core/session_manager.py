@@ -28,20 +28,46 @@ class SessionManager:
 
     def _load_session(self) -> None:
         """Load existing session from env or storage file."""
-        # Priority 1: Next-Auth cookie from env
-        if settings.arcadia_session_cookie:
-            self._cookie = settings.arcadia_session_cookie
-            logger.info("session.loaded_from_env", method="cookie")
+        # 1. Determine if env cookie has changed since last boot (manual override check)
+        env_cookie = settings.arcadia_session_cookie
+        last_env_path = os.path.join(os.path.dirname(self._storage_state_path), "last_env_cookie.txt")
+        
+        env_changed = False
+        if env_cookie:
+            last_env_cookie = None
+            if os.path.exists(last_env_path):
+                try:
+                    with open(last_env_path, "r", encoding="utf-8") as f:
+                        last_env_cookie = f.read().strip()
+                except Exception:
+                    pass
+            
+            # If there is no record of a last seen env cookie, or it is different from the current one
+            if last_env_cookie != env_cookie:
+                env_changed = True
+                logger.info("session.env_cookie_changed_or_new", changed=bool(last_env_cookie))
+                # Save the new env cookie as last seen
+                try:
+                    os.makedirs(os.path.dirname(last_env_path), exist_ok=True)
+                    with open(last_env_path, "w", encoding="utf-8") as f:
+                        f.write(env_cookie)
+                except Exception as e:
+                    logger.warning("session.save_last_env_failed", error=str(e))
+
+        # 2. Priority 1: If env cookie changed, use it to override everything (manual user dashboard update)
+        if env_changed and env_cookie:
+            self._cookie = env_cookie
+            logger.info("session.loaded_from_env_override", method="cookie")
+            # If env cookie is an override, remove storage state to force regeneration
+            if os.path.exists(self._storage_state_path):
+                try:
+                    os.remove(self._storage_state_path)
+                    logger.info("session.removed_stale_storage_state")
+                except Exception:
+                    pass
             return
 
-        # Priority 2: Explicit API token (legacy)
-        if settings.arcadia_api_token:
-            self._token = settings.arcadia_api_token
-            self._csrf = settings.arcadia_csrf_token
-            logger.info("session.loaded_from_env", method="api_token")
-            return
-
-        # Priority 3: Playwright storage state file
+        # 3. Priority 2: Playwright storage state file (the rolling session from persistent volume)
         if os.path.exists(self._storage_state_path):
             try:
                 with open(self._storage_state_path, "r") as f:
@@ -68,8 +94,22 @@ class SessionManager:
                                 self._token = item["value"]
 
                 logger.info("session.loaded_from_storage", path=self._storage_state_path)
+                return
             except Exception as e:
                 logger.warning("session.load_failed", error=str(e))
+
+        # 4. Priority 3: Next-Auth cookie from env (first-time fallback or if storage state is empty/corrupt)
+        if env_cookie:
+            self._cookie = env_cookie
+            logger.info("session.loaded_from_env_fallback", method="cookie")
+            return
+
+        # 5. Priority 4: Explicit API token (legacy)
+        if settings.arcadia_api_token:
+            self._token = settings.arcadia_api_token
+            self._csrf = settings.arcadia_csrf_token
+            logger.info("session.loaded_from_env_fallback", method="api_token")
+            return
 
     def get_session_token(self) -> Optional[str]:
         """Extract __Secure-next-auth.session-token from cookie string."""
