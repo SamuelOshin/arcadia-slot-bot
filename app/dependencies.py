@@ -28,12 +28,16 @@ async def get_strategy_router(
     session_manager: SessionManager = Depends(get_session_manager),
     notifier: Notifier = Depends(get_notifier),
     circuit_breaker: CircuitBreaker = Depends(get_circuit_breaker),
-) -> StrategyRouter:
-    return StrategyRouter(
+) -> AsyncGenerator[StrategyRouter, None]:
+    router = StrategyRouter(
         session_manager=session_manager,
         notifier=notifier,
         circuit_breaker=circuit_breaker,
     )
+    try:
+        yield router
+    finally:
+        await router.close_all()
 
 
 async def get_campaign_monitor(request: Request):
