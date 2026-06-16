@@ -23,9 +23,12 @@ from app.core.scheduler import BotScheduler
 from app.services.campaign_monitor import CampaignMonitor
 
 # Configure structured logging
+from app.services.telegram_bot import structlog_memory_buffer_processor
+
 structlog.configure(
     processors=[
         structlog.processors.TimeStamper(fmt="iso"),
+        structlog_memory_buffer_processor,
         structlog.processors.JSONRenderer(),
     ],
     wrapper_class=structlog.make_filtering_bound_logger(settings.log_level),
@@ -59,12 +62,29 @@ async def lifespan(app: FastAPI):
     app.state.scheduler = scheduler
     app.state.monitor = monitor
 
+    # Initialize and start Telegram bot
+    tg_bot = None
+    if settings.telegram_bot_token:
+        try:
+            logger.info("app.startup_telegram_bot")
+            from app.services.telegram_bot import TelegramBotService
+            tg_bot = TelegramBotService(monitor, scheduler)
+            await tg_bot.start()
+            app.state.tg_bot = tg_bot
+        except Exception as tg_err:
+            logger.error("app.telegram_bot_startup_failed", error=str(tg_err))
+
     logger.info("app.ready", port=settings.port)
 
     yield
 
     # Shutdown
     logger.info("app.shutdown")
+    if hasattr(app.state, "tg_bot") and app.state.tg_bot:
+        try:
+            await app.state.tg_bot.stop()
+        except Exception as tg_stop_err:
+            logger.error("app.telegram_bot_shutdown_failed", error=str(tg_stop_err))
     scheduler.stop()
 
 
