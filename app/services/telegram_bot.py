@@ -129,10 +129,12 @@ class TelegramBotService:
             self.logger.info("telegram.bot_stopped")
 
     async def is_authorized(self, update: Update) -> bool:
-        """Verify if the update is from the configured admin chat ID."""
+        """Verify if the update is from the list of allowed chat IDs."""
         if not settings.telegram_chat_id:
             return False
-        return str(update.effective_chat.id) == settings.telegram_chat_id
+        # Support a comma-separated list of allowed user IDs
+        allowed_ids = [x.strip() for x in settings.telegram_chat_id.split(",") if x.strip()]
+        return str(update.effective_chat.id) in allowed_ids
 
     def update_env_var(self, key: str, value: str) -> None:
         """Helper to write config variables back to the .env file."""
