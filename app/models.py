@@ -43,6 +43,7 @@ class Campaign(BaseModel):
     mySubmission: Optional[dict] = None                 # null = not submitted
     cpmRules: List[dict] = []                           # tier-based CPM rates
     reservation: Optional[dict] = None                  # gold tier reservation
+    scheduledSlots: List[dict] = []                      # populated on detail fetch (claim_slot campaigns only)
 
     @property
     def _id(self) -> str:
@@ -76,6 +77,48 @@ class Campaign(BaseModel):
     @property
     def needs_claim(self) -> bool:
         return self.ugcSlotMode == "claim_slot"
+
+    def eligible_slots(self) -> List[dict]:
+        """Return claimable slots from scheduledSlots for the current user.
+
+        Uses campaign.reservation.reservedEligibleForMe (the API's own eligibility
+        signal) rather than any hardcoded slot-number heuristic.  All field access
+        is via .get() with safe defaults so the bot degrades gracefully if the real
+        schema differs from expectations — this is intentional until Phase 2 hardens
+        the model with observed field names.
+        """
+        # Determine whether this user qualifies for gold-reserved slots.
+        # `reservedEligibleForMe` is set server-side per authenticated user.
+        if self.reservation:
+            user_eligible_for_reserved = self.reservation.get("reservedEligibleForMe", False)
+        else:
+            user_eligible_for_reserved = True  # No reservation block = all slots open
+
+        eligible = []
+        for slot in self.scheduledSlots:
+            # --- Availability check (defensive: try multiple candidate field names) ---
+            # We don't know yet whether the real field is "status", "state", etc.
+            claimed_by = (
+                slot.get("userId")
+                or slot.get("claimedBy")
+                or slot.get("lockedBy")
+            )
+            slot_status = slot.get("status") or slot.get("state") or "available"
+            if claimed_by or slot_status in ("locked", "claimed", "taken"):
+                continue
+
+            # --- Tier / reservation check (API signal, not slot-number heuristic) ---
+            is_reserved_slot = (
+                slot.get("reserved")
+                or slot.get("tier") == "gold"
+                or slot.get("reservedTier") is not None  # another possible field name
+            )
+            if is_reserved_slot and not user_eligible_for_reserved:
+                continue
+
+            eligible.append(slot)
+
+        return eligible
 
     @property
     def is_lockable(self) -> bool:

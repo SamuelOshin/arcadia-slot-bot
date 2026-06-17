@@ -75,6 +75,10 @@ class TelegramBotService:
         self.app: Optional[Application] = None
         self.pairing_code: Optional[str] = None
         self.logger = logger.bind(component="telegram_bot")
+        # /watch state
+        self._watch_task: Optional[asyncio.Task] = None
+        self._watch_active: bool = False
+        self._watch_seen_ids: set = set()   # campaign IDs already reported
 
     async def start(self) -> None:
         """Initialize and start the Telegram Bot polling task."""
@@ -106,6 +110,7 @@ class TelegramBotService:
         self.app.add_handler(CommandHandler("set_cookie", self.handle_set_cookie))
         self.app.add_handler(CommandHandler("set_min_payout", self.handle_set_min_payout))
         self.app.add_handler(CommandHandler("set_interval", self.handle_set_interval))
+        self.app.add_handler(CommandHandler("watch", self.handle_watch))
 
         # Handle text menu choices
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
@@ -163,10 +168,12 @@ class TelegramBotService:
 
     async def send_main_menu(self, update: Update) -> None:
         """Display the main persistent command menu/keyboard."""
+        watch_label = "🔴 Stop Watch" if self._watch_active else "👁️ Watch Slots"
         keyboard = [
             ["📊 Status", "🎯 Open Campaigns"],
             ["🔄 Force Check", "⚙️ Auto-Lock"],
-            ["📜 View Logs", "🔧 Config Menu"]
+            ["📜 View Logs", "🔧 Config Menu"],
+            [watch_label],
         ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await update.message.reply_text(
@@ -485,6 +492,172 @@ To edit these values or update your credentials, use the following commands:
         except ValueError:
             await update.message.reply_text("❌ Invalid integer value.")
 
+    async def handle_watch(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Toggle the background claim_slot campaign watcher on/off.
+
+        When active, the bot polls the campaign list every 5 seconds.  The moment
+        a campaign with ugcSlotMode == 'claim_slot' is detected, it fetches the
+        full detail response and sends the raw slot schema here as a Telegram message
+        so you can confirm real field names (Phase 0 reconnaissance).
+
+        Send /watch again (or tap the button) to stop the watcher.
+        """
+        if not await self.is_authorized(update):
+            await update.message.reply_text("❌ Unauthorized.")
+            return
+
+        if self._watch_active:
+            # --- Stop ---
+            self._watch_active = False
+            if self._watch_task and not self._watch_task.done():
+                self._watch_task.cancel()
+            self._watch_task = None
+            self._watch_seen_ids.clear()
+            await update.message.reply_text(
+                "🔴 <b>Slot Watcher stopped.</b>",
+                parse_mode="HTML",
+            )
+        else:
+            # --- Start ---
+            self._watch_active = True
+            self._watch_seen_ids.clear()
+            chat_id = update.effective_chat.id
+            self._watch_task = asyncio.create_task(
+                self._watch_loop(chat_id)
+            )
+            await update.message.reply_text(
+                "👁️ <b>Slot Watcher started!</b>\n\n"
+                "Polling every 5 seconds for <code>claim_slot</code> campaigns.\n"
+                "I'll message you here the moment one appears with the full slot schema.\n\n"
+                "Send /watch again to stop.",
+                parse_mode="HTML",
+            )
+        # Refresh menu so the button label flips
+        await self.send_main_menu(update)
+
+    async def _watch_loop(self, chat_id: int) -> None:
+        """Background coroutine: poll for claim_slot campaigns and report via Telegram.
+
+        Runs until self._watch_active is False or the task is cancelled.
+        Sends a Telegram message with the raw scheduledSlots schema when a new
+        claim_slot campaign is found — safe to leave running on Railway.
+        """
+        import json as _json
+        from app.strategies.api_strategy import APIStrategy
+
+        self.logger.info("telegram.watch_loop.started", chat_id=chat_id)
+        poll_count = 0
+
+        while self._watch_active:
+            poll_count += 1
+            try:
+                api: APIStrategy = self.monitor.client.router._get_strategy("api")
+                status, data, _, _ = await api._request(
+                    "GET", f"{api.base_url}/clip/campaigns"
+                )
+
+                if status != 200:
+                    await asyncio.sleep(5)
+                    continue
+
+                items = data
+                if isinstance(data, dict):
+                    items = data.get("campaigns", data.get("data", data.get("items", [])))
+                if not isinstance(items, list):
+                    await asyncio.sleep(5)
+                    continue
+
+                claim_slot_items = [
+                    c for c in items
+                    if c.get("ugcSlotMode") == "claim_slot"
+                ]
+
+                for item in claim_slot_items:
+                    cid = item.get("_id")
+                    if not cid or cid in self._watch_seen_ids:
+                        continue
+
+                    self._watch_seen_ids.add(cid)
+                    title = item.get("title", cid)
+
+                    # Fetch full detail to get scheduledSlots
+                    d_status, detail, _, _ = await api._request(
+                        "GET", f"{api.base_url}/clip/campaigns/{cid}"
+                    )
+
+                    if d_status != 200:
+                        await self.app.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"👁️ <b>claim_slot campaign found!</b>\n"
+                                f"<b>{title}</b> (<code>{cid}</code>)\n"
+                                f"⚠️ Could not fetch detail (HTTP {d_status})"
+                            ),
+                            parse_mode="HTML",
+                        )
+                        continue
+
+                    scheduled_slots = detail.get("scheduledSlots", [])
+                    campaign_obj = detail.get("campaign", {})
+                    reservation = campaign_obj.get("reservation")
+
+                    # Build the report message
+                    header = (
+                        f"🚨 <b>claim_slot Campaign Detected!</b>\n\n"
+                        f"📛 <b>Title:</b> {html.escape(title)}\n"
+                        f"🆔 <b>ID:</b> <code>{cid}</code>\n"
+                        f"🔑 <b>ugcSlotMode:</b> <code>claim_slot</code>\n"
+                        f"🪑 <b>scheduledSlots count:</b> <code>{len(scheduled_slots)}</code>\n"
+                        f"📦 <b>reservation:</b> <code>{html.escape(_json.dumps(reservation))}</code>"
+                    )
+                    await self.app.bot.send_message(
+                        chat_id=chat_id,
+                        text=header,
+                        parse_mode="HTML",
+                    )
+
+                    if scheduled_slots:
+                        # Send first 2 slot objects so we can see the real schema
+                        for i, slot in enumerate(scheduled_slots[:2], 1):
+                            slot_json = _json.dumps(slot, indent=2)
+                            escaped = html.escape(slot_json)
+                            await self.app.bot.send_message(
+                                chat_id=chat_id,
+                                text=(
+                                    f"📋 <b>Slot #{i} raw schema:</b>\n"
+                                    f"<pre>{escaped}</pre>"
+                                ),
+                                parse_mode="HTML",
+                            )
+                        keys = list(scheduled_slots[0].keys()) if scheduled_slots else []
+                        await self.app.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"🔑 <b>Field names observed:</b>\n"
+                                f"<code>{html.escape(str(keys))}</code>\n\n"
+                                f"✅ Schema captured — you can now update the Pydantic model!"
+                            ),
+                            parse_mode="HTML",
+                        )
+                    else:
+                        await self.app.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"⚠️ <b>scheduledSlots is empty</b> — campaign may not have started yet.\n"
+                                f"The watcher will keep polling. Send /watch to stop."
+                            ),
+                            parse_mode="HTML",
+                        )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.warning("telegram.watch_loop.error", error=str(e))
+
+            await asyncio.sleep(5)
+
+        self.logger.info("telegram.watch_loop.stopped", chat_id=chat_id)
+
     # --- Text menu buttons dispatcher ---
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -505,6 +678,8 @@ To edit these values or update your credentials, use the following commands:
             await self.show_logs(update)
         elif text == "🔧 Config Menu":
             await self.show_config_menu(update)
+        elif text in ("👁️ Watch Slots", "🔴 Stop Watch"):
+            await self.handle_watch(update, context)
         else:
             await update.message.reply_text("❓ Unknown option. Please use the menu below.")
 

@@ -122,9 +122,17 @@ class ArcadiaClient:
     ) -> SlotLockResult:
         """Lock a campaign slot with quota checks.
 
+        For ugcSlotMode == 'claim_slot' campaigns, routes directly to
+        APIStrategy.lock_slot_for_claim_campaign() which handles slot
+        iteration and 409 collisions internally.  This keeps the circuit
+        breaker clean — slot-level 409s are business events, not failures.
+
+        For all other campaign types (open_submit, etc.) the existing
+        StrategyRouter path is used unchanged.
+
         Args:
             campaign_id: Campaign to lock.
-            strategy: Force specific strategy.
+            strategy: Force specific strategy (open_submit path only).
             force: Bypass quota checks (manual override).
 
         Returns:
@@ -140,7 +148,24 @@ class ArcadiaClient:
                 response_time_ms=0,
             )
 
-        result = await self.router.lock_slot(campaign_id, preferred_strategy=strategy)
+        # --- Branch on campaign type ---
+        # Fetch campaign to determine ugcSlotMode.
+        # get_campaign() also hydrates scheduledSlots so it does double duty.
+        api_strategy = self.router._get_strategy("api")
+        campaign = await api_strategy.get_campaign(campaign_id)
+
+        if campaign and campaign.needs_claim:
+            # claim_slot path: slot-aware locking entirely within APIStrategy.
+            # StrategyRouter / CircuitBreaker are intentionally bypassed here.
+            self.logger.info(
+                "client.claim_slot_path",
+                campaign_id=campaign_id,
+                slots=len(campaign.scheduledSlots),
+            )
+            result = await api_strategy.lock_slot_for_claim_campaign(campaign)
+        else:
+            # Standard path: open_submit and all other campaign types.
+            result = await self.router.lock_slot(campaign_id, preferred_strategy=strategy)
 
         if result.success:
             self._slots_locked_today += 1

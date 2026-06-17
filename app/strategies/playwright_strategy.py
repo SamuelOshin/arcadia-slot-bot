@@ -146,9 +146,43 @@ class PlaywrightStrategy(BaseStrategy):
             return []
 
     async def lock_slot(self, campaign_id: str) -> SlotLockResult:
-        """Navigate to campaign and click the lock button."""
+        """Navigate to campaign and click the lock button.
+
+        NOTE: claim_slot campaigns (ugcSlotMode == 'claim_slot') are NOT
+        supported by this strategy.  Clicking a random slot button risks
+        selecting a gold-reserved slot, which wastes the opportunity.
+        These campaigns are handled by APIStrategy.lock_slot_for_claim_campaign().
+        """
         start_time = time.time()
+
+        # --- Guard: refuse claim_slot campaigns ---
+        # Use a lightweight API check before spinning up the browser.
+        try:
+            from app.strategies.api_strategy import APIStrategy
+            api = APIStrategy(self.session)
+            campaign = await api.get_campaign(campaign_id)
+            await api.close()
+            if campaign and campaign.needs_claim:
+                elapsed = (time.time() - start_time) * 1000
+                return SlotLockResult(
+                    success=False,
+                    campaign_id=campaign_id,
+                    campaign_title=campaign.title,
+                    message=(
+                        "Playwright does not support claim_slot campaigns — "
+                        "use APIStrategy.lock_slot_for_claim_campaign() instead"
+                    ),
+                    strategy_used=self.name,
+                    response_time_ms=elapsed,
+                    definitive=True,  # Don't try AI agent either; caller should give up
+                )
+        except Exception:
+            # If the API check fails, fall through to original behaviour rather than
+            # blocking Playwright from running at all.
+            pass
+
         page = await self._ensure_browser()
+
 
         try:
             # Navigate to specific campaign
