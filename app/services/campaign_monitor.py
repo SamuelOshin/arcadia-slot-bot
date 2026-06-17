@@ -90,10 +90,11 @@ class CampaignMonitor:
                         "timestamp": datetime.utcnow()
                     }
 
-            # Notify on new campaign drops
+            # Notify on new campaign drops if they are lockable (have slots)
             for campaign in new_campaigns:
-                self.logger.info("monitor.new_campaign", campaign=campaign.id, payout=campaign.payout_amount)
-                await self.notifier.notify_campaign_dropped(campaign)
+                if campaign.is_lockable:
+                    self.logger.info("monitor.new_campaign", campaign=campaign.id, payout=campaign.payout_amount)
+                    await self.notifier.notify_campaign_dropped(campaign)
 
             # Update known set
             self._known_campaigns = {c.id for c in raw_campaigns}

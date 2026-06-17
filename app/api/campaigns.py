@@ -30,7 +30,8 @@ async def list_campaigns(
     campaigns = await client.get_available_campaigns(filters)
 
     if status:
-        campaigns = [c for c in campaigns if c.status.value == status]
+        target_status = "active" if status == "open" else status
+        campaigns = [c for c in campaigns if c.status == target_status]
 
     return campaigns
 
