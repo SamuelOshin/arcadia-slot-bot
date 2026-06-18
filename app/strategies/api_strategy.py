@@ -614,61 +614,90 @@ class APIStrategy(BaseStrategy):
         )
 
     async def fast_lock(self, campaign_id: str) -> SlotLockResult:
-        """Direct, minimal overhead lock bypass for maximum speed."""
+        """Direct lock using the shared _request() helper.
+
+        Previously used raw aiohttp which skipped the cookie jar, causing
+        400 errors on CPM campaigns. Now uses _request() so auth headers
+        and cookies are always properly injected.
+        """
         start_time = time.time()
         url = f"{self.base_url}/clip/campaigns/{campaign_id}/lock"
-        headers = self.session.headers.copy()
 
         try:
-            async with self.client.post(url, headers=headers, json={}, timeout=3.0) as response:
-                status = response.status
-                elapsed_ms = (time.time() - start_time) * 1000
+            status, data, resp_text, headers = await self._request("POST", url, json={})
+            elapsed_ms = (time.time() - start_time) * 1000
 
-                if status in (200, 201):
-                    slot_num = None
-                    try:
-                        data = await response.json()
-                        if isinstance(data, dict):
-                            slot_num = data.get("slotNumber")
-                            if slot_num is None and "myLock" in data and isinstance(data["myLock"], dict):
-                                slot_num = data["myLock"].get("slotNumber")
-                            if slot_num is None and "lock" in data and isinstance(data["lock"], dict):
-                                slot_num = data["lock"].get("slotNumber")
-                            if slot_num is None:
-                                slot_num = data.get("slot_number") or data.get("slotsLocked")
-                    except:
-                        pass
+            if status in (200, 201):
+                slot_num = None
+                title = campaign_id
+                if isinstance(data, dict):
+                    title = data.get("title") or (data.get("campaign") or {}).get("title") or campaign_id
+                    slot_num = data.get("slotNumber")
+                    if slot_num is None and "myLock" in data and isinstance(data["myLock"], dict):
+                        slot_num = data["myLock"].get("slotNumber")
+                    if slot_num is None and "lock" in data and isinstance(data["lock"], dict):
+                        slot_num = data["lock"].get("slotNumber")
+                    if slot_num is None:
+                        slot_num = data.get("slot_number") or data.get("slotsLocked")
 
-                    return SlotLockResult(
-                        success=True,
-                        campaign_id=campaign_id,
-                        campaign_title=campaign_id,
-                        slot_number=slot_num,
-                        message="locked",
-                        strategy_used="api-fast",
-                        response_time_ms=elapsed_ms,
-                        definitive=True,
-                    )
-                elif status == 409:
-                    return SlotLockResult(
-                        success=False,
-                        campaign_id=campaign_id,
-                        campaign_title=campaign_id,
-                        message="taken",
-                        strategy_used="api-fast",
-                        response_time_ms=elapsed_ms,
-                        definitive=True,
-                    )
-                else:
-                    return SlotLockResult(
-                        success=False,
-                        campaign_id=campaign_id,
-                        campaign_title=campaign_id,
-                        message=f"failed: {status}",
-                        strategy_used="api-fast",
-                        response_time_ms=elapsed_ms,
-                        definitive=True,
-                    )
+                return SlotLockResult(
+                    success=True,
+                    campaign_id=campaign_id,
+                    campaign_title=title,
+                    slot_number=slot_num,
+                    message="locked",
+                    strategy_used="api-fast",
+                    response_time_ms=elapsed_ms,
+                    definitive=True,
+                )
+            elif status == 409:
+                return SlotLockResult(
+                    success=False,
+                    campaign_id=campaign_id,
+                    campaign_title=campaign_id,
+                    message="taken",
+                    strategy_used="api-fast",
+                    response_time_ms=elapsed_ms,
+                    definitive=True,
+                )
+            elif status == 400:
+                # Log full 400 body so we can see exactly what the API requires
+                error_detail = self._parse_error(data, resp_text)
+                self.logger.warning(
+                    "api.fast_lock.bad_request",
+                    campaign_id=campaign_id,
+                    error=error_detail,
+                    body=resp_text[:500],
+                )
+                return SlotLockResult(
+                    success=False,
+                    campaign_id=campaign_id,
+                    campaign_title=campaign_id,
+                    message=f"bad_request: {error_detail}",
+                    strategy_used="api-fast",
+                    response_time_ms=elapsed_ms,
+                    definitive=True,
+                )
+            elif status in (401, 403):
+                raise AuthError("Auth failed in fast_lock")
+            else:
+                self.logger.warning(
+                    "api.fast_lock.unexpected_status",
+                    campaign_id=campaign_id,
+                    status=status,
+                    body=resp_text[:200],
+                )
+                return SlotLockResult(
+                    success=False,
+                    campaign_id=campaign_id,
+                    campaign_title=campaign_id,
+                    message=f"failed: {status}",
+                    strategy_used="api-fast",
+                    response_time_ms=elapsed_ms,
+                    definitive=True,
+                )
+        except AuthError:
+            raise
         except Exception as e:
             elapsed_ms = (time.time() - start_time) * 1000
             return SlotLockResult(
