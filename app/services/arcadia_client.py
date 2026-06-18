@@ -53,10 +53,20 @@ class ArcadiaClient:
         for c in campaigns:
             # Skip already locked
             if c.id in self._locked_campaigns:
+                self.logger.debug("client.filter_skip", campaign_id=c.id, reason="already_locked_by_bot")
                 continue
 
             # Skip if not lockable
             if not c.is_lockable:
+                self.logger.debug("client.filter_skip", campaign_id=c.id, title=c.title, reason="not_lockable",
+                    my_lock=c.myLock is not None,
+                    my_submission=c.mySubmission is not None,
+                    slots_remaining=c.slotsRemaining,
+                    status=c.status,
+                    reservation_eligible=c.reservation.get("reservedEligibleForMe") if c.reservation else None,
+                    general_locked=c.reservation.get("generalLocked") if c.reservation else None,
+                    general_capacity=c.reservation.get("generalCapacity") if c.reservation else None,
+                )
                 continue
 
             # Reservation check for Bronze tier
@@ -68,6 +78,8 @@ class ArcadiaClient:
                     gen_locked = c.reservation.get("generalLocked", 0)
                     gen_available = gen_capacity - gen_locked
                     if gen_available <= 0:
+                        self.logger.debug("client.filter_skip", campaign_id=c.id, reason="general_slots_full",
+                            gen_capacity=gen_capacity, gen_locked=gen_locked)
                         continue
                 else:
                     # User is eligible for reserved slots
@@ -77,10 +89,13 @@ class ArcadiaClient:
                     res_locked = c.reservation.get("reservedLocked", 0)
                     total_available = (gen_capacity - gen_locked) + (res_total - res_locked)
                     if total_available <= 0:
+                        self.logger.debug("client.filter_skip", campaign_id=c.id, reason="all_slots_full_reserved_eligible")
                         continue
 
             # Minimum payout filter
             if filters.min_payout and c.payout_amount < filters.min_payout:
+                self.logger.debug("client.filter_skip", campaign_id=c.id, reason="below_min_payout",
+                    payout=c.payout_amount, min_payout=filters.min_payout)
                 continue
 
             # Type filter (kinds)
@@ -101,6 +116,7 @@ class ArcadiaClient:
 
             filtered.append(c)
 
+        self.logger.info("client.filter_result", total=len(campaigns), passed=len(filtered))
         # Sort by payout desc, then slots remaining asc (race for scarce slots)
         filtered.sort(key=lambda c: (-c.payout_amount, c.slots_remaining if c.slots_remaining is not None else float('inf')))
 

@@ -92,8 +92,51 @@ class CampaignMonitor:
 
             # Notify on new campaign drops if they are lockable (have slots)
             for campaign in new_campaigns:
+                # Always log full details so we can diagnose filter rejections
+                reservation = campaign.reservation or {}
+                self.logger.info(
+                    "monitor.new_campaign_detected",
+                    campaign_id=campaign.id,
+                    title=campaign.title,
+                    payout=campaign.payout_amount,
+                    slots_remaining=campaign.slotsRemaining,
+                    status=campaign.status,
+                    is_lockable=campaign.is_lockable,
+                    my_lock=campaign.myLock is not None,
+                    my_submission=campaign.mySubmission is not None,
+                    reservation_enabled=reservation.get("enabled"),
+                    reserved_eligible_for_me=reservation.get("reservedEligibleForMe"),
+                    general_capacity=reservation.get("generalCapacity"),
+                    general_locked=reservation.get("generalLocked"),
+                    auto_lock_enabled=settings.auto_lock_enabled,
+                    min_payout_filter=settings.campaign_filter_min_payout,
+                )
                 if campaign.is_lockable:
                     self.logger.info("monitor.new_campaign", campaign=campaign.id, payout=campaign.payout_amount)
+                    await self.notifier.notify_campaign_dropped(campaign)
+                else:
+                    self.logger.warning(
+                        "monitor.new_campaign_not_lockable",
+                        campaign_id=campaign.id,
+                        title=campaign.title,
+                        reason=(
+                            "already_locked" if campaign.myLock is not None else
+                            "already_submitted" if campaign.mySubmission is not None else
+                            "no_slots" if (campaign.slotsRemaining is not None and campaign.slotsRemaining <= 0) else
+                            "reservation_full" if (
+                                campaign.reservation and
+                                not campaign.reservation.get("reservedEligibleForMe", False) and
+                                campaign.reservation.get("generalLocked", 0) >= campaign.reservation.get("generalCapacity", 0)
+                            ) else
+                            "status_not_active" if campaign.status != "active" else
+                            "expired" if (
+                                campaign.ends_at and
+                                campaign.ends_at < __import__('datetime').datetime.now(campaign.ends_at.tzinfo)
+                            ) else
+                            "unknown"
+                        )
+                    )
+                    # Still notify user so they can manually lock
                     await self.notifier.notify_campaign_dropped(campaign)
 
             # Update known set
