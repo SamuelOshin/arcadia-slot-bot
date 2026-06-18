@@ -689,7 +689,7 @@ To edit these values or update your credentials, use the following commands:
         query = update.callback_query
         await query.answer()
         
-        if not settings.telegram_chat_id or str(query.message.chat.id) != settings.telegram_chat_id:
+        if not await self.is_authorized(update):
             await query.message.reply_text("❌ Unauthorized callback.")
             return
             

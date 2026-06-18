@@ -108,7 +108,9 @@ Please run the setup script to re-authenticate:
         tasks = []
 
         if self._telegram_token and self._telegram_chat_id:
-            tasks.append(self._send_telegram(message))
+            chat_ids = [x.strip() for x in self._telegram_chat_id.split(",") if x.strip()]
+            for chat_id in chat_ids:
+                tasks.append(self._send_telegram(chat_id, message))
 
         if self._discord_webhook:
             tasks.append(self._send_discord(message))
@@ -122,11 +124,11 @@ Please run the setup script to re-authenticate:
                 if isinstance(result, Exception):
                     logger.error("notification.channel_failed", index=i, error=str(result))
 
-    async def _send_telegram(self, message: str) -> None:
+    async def _send_telegram(self, chat_id: str, message: str) -> None:
         """Send message via Telegram Bot API."""
         url = f"https://api.telegram.org/bot{self._telegram_token}/sendMessage"
         payload = {
-            "chat_id": self._telegram_chat_id,
+            "chat_id": chat_id,
             "text": message,
             "parse_mode": "HTML",
             "disable_web_page_preview": False,

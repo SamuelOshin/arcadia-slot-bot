@@ -1,0 +1,65 @@
+{
+  "campaign": {
+    "_id": "6a26fc8012907abb71e8dcab",
+    "title": "Clasho UGC Campaign #1",
+    "campaignCode": "CLASHO-UGC-01",
+    "description": "Create high-energy UGC clips and posts that showcase the excitement of Clasho the platform that finally pays creators what they\u2019re truly worth. Highlight how anyone (big or small accounts) can compete, win, and earn by creating great content for brands.",
+    "instructions": "- Post must be posted as a QRT of this tweet: https://x.com/clashoAi/status/2064019930094121421\n- Minimum 1000 impressions required to qualify for payout.\n- No AI-written content. Needs to be authentic and high-quality.\n- No botting or fake engagement, this will lead to instant disqualification and zero payment.\n- Use the Paid Partnership feature when posting your post.\n- IF YOU FORGET TO SUBMIT YOUR POST BEFORE DEADLINE, POST WILL BE FORFEITED.",
+    "briefUrl": "https://web3arcadia.notion.site/Clasho-UGC-Campaign-1-379bd87fbe6b802e93c9f6ba529e2d14",
+    "brandImageUrl": "https://pub-62ef663332594e2a93e7b54aeb656b97.r2.dev/clipping-brands/1780939467853-clashoai.webp",
+    "hashtags": [],
+    "mandatoryTags": [
+      "clashoAi"
+    ],
+    "referenceClipUrls": [],
+    "startDate": "2026-06-08T03:30:00.000Z",
+    "endDate": "2026-06-09T21:30:00.000Z",
+    "kind": "ugc",
+    "maxSlots": 1,
+    "slotsLocked": 105,
+    "slotsRemaining": null,
+    "reservation": null,
+    "cpmRules": [
+      {
+        "tier": "gold",
+        "ratePerThousand": 4,
+        "maxPerClip": 20
+      },
+      {
+        "tier": "silver",
+        "ratePerThousand": 3,
+        "maxPerClip": 15
+      },
+      {
+        "tier": "bronze",
+        "ratePerThousand": 2,
+        "maxPerClip": 15
+      }
+    ],
+    "status": "active",
+    "clipGroups": [],
+    "postPrice": 10,
+    "ugcCapacityMode": "open",
+    "ugcSlotMode": "open_submit"
+  },
+  "scheduledSlots": [],
+  "myLock": null,
+  "mySubmission": {
+    "_id": "6a28128112907abb71ea2429",
+    "tweetUrl": "https://x.com/thatguy_cyrix/status/2064220574285451527",
+    "status": "approved",
+    "metrics": {
+      "views": 3201,
+      "likes": 71,
+      "retweets": 2,
+      "bookmarks": 32,
+      "replies": 13,
+      "quotes": 0,
+      "impressions": 3201,
+      "engagementRate": 0.03686348016244923,
+      "fetchedAt": "2026-06-13T16:53:56.276Z"
+    },
+    "computedPayout": 10,
+    "createdAt": "2026-06-09T13:17:53.570Z"
+  }
+}

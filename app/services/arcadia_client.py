@@ -237,8 +237,16 @@ class ArcadiaClient:
 
         self.logger.info("client.auto_lock_concurrent_start", count=len(campaigns_to_attempt))
 
-        # We will use fast_lock concurrently!
-        tasks = [self.fast_lock_campaign(c.id) for c in campaigns_to_attempt]
+        # We will use fast_lock concurrently, but branch for claim_slot campaigns
+        tasks = []
+        api_strategy = self.router._get_strategy("api")
+        for c in campaigns_to_attempt:
+            if c.needs_claim:
+                self.logger.info("client.auto_lock.claim_slot_path", campaign_id=c.id)
+                tasks.append(api_strategy.lock_slot_for_claim_campaign(c))
+            else:
+                tasks.append(self.fast_lock_campaign(c.id))
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         processed_results = []
