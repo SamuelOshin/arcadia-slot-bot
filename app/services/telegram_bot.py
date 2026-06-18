@@ -60,6 +60,10 @@ def structlog_memory_buffer_processor(logger_inst, name: str, event_dict: dict) 
         
         log_line = f"[{timestamp}] {level}: {event}{extras_str}"
         log_buffer.append(log_line)
+        
+        # Map event to message for Railway log viewer visibility
+        if "message" not in event_dict:
+            event_dict["message"] = event
     except Exception:
         pass
     return event_dict
