@@ -37,6 +37,7 @@ class CampaignMonitor:
         self._known_campaigns: Set[str] = set()
         self._last_check: Optional[datetime] = None
         self._last_campaign_states: dict[str, dict] = {}
+        self._is_warmed_up: bool = False   # True after first silent poll
         self.logger = logger.bind(component="campaign_monitor")
 
     async def check_and_lock(self) -> int:
@@ -52,7 +53,30 @@ class CampaignMonitor:
             recently_filled = False
             new_campaigns = []
 
-            for c in raw_campaigns:
+            # --- Warm-up: first poll after (re)start silently seeds known campaigns ---
+            # This prevents a deploy/restart from firing notifications for every
+            # campaign that was already running before the restart.
+            if not self._is_warmed_up:
+                self._known_campaigns = {c.id for c in raw_campaigns}
+                self._is_warmed_up = True
+                self._last_check = datetime.utcnow()
+                self.logger.info(
+                    "monitor.warmed_up",
+                    seeded=len(self._known_campaigns),
+                )
+                # Still run the full state tracking below, but skip notifications.
+                for c in raw_campaigns:
+                    slots = c.slotsRemaining if c.slotsRemaining is not None else float('inf')
+                    is_full = slots <= 0
+                    if c.reservation:
+                        eligible = c.reservation.get("reservedEligibleForMe", False)
+                    if c.status == "active":
+                        self._last_campaign_states[c.id] = {
+                            "slots_available": not is_full,
+                            "timestamp": datetime.utcnow()
+                        }
+                return next_interval
+
                 if c.id not in self._known_campaigns:
                     new_campaigns.append(c)
 
@@ -115,29 +139,32 @@ class CampaignMonitor:
                     self.logger.info("monitor.new_campaign", campaign=campaign.id, payout=campaign.payout_amount)
                     await self.notifier.notify_campaign_dropped(campaign)
                 else:
+                    rejection_reason = (
+                        "already_locked" if campaign.myLock is not None else
+                        "already_submitted" if campaign.mySubmission is not None else
+                        "no_slots" if (campaign.slotsRemaining is not None and campaign.slotsRemaining <= 0) else
+                        "reservation_full" if (
+                            campaign.reservation and
+                            not campaign.reservation.get("reservedEligibleForMe", False) and
+                            campaign.reservation.get("generalLocked", 0) >= campaign.reservation.get("generalCapacity", 0)
+                        ) else
+                        "status_not_active" if campaign.status != "active" else
+                        "expired" if (
+                            campaign.ends_at and
+                            campaign.ends_at < __import__('datetime').datetime.now(campaign.ends_at.tzinfo)
+                        ) else
+                        "unknown"
+                    )
                     self.logger.warning(
                         "monitor.new_campaign_not_lockable",
                         campaign_id=campaign.id,
                         title=campaign.title,
-                        reason=(
-                            "already_locked" if campaign.myLock is not None else
-                            "already_submitted" if campaign.mySubmission is not None else
-                            "no_slots" if (campaign.slotsRemaining is not None and campaign.slotsRemaining <= 0) else
-                            "reservation_full" if (
-                                campaign.reservation and
-                                not campaign.reservation.get("reservedEligibleForMe", False) and
-                                campaign.reservation.get("generalLocked", 0) >= campaign.reservation.get("generalCapacity", 0)
-                            ) else
-                            "status_not_active" if campaign.status != "active" else
-                            "expired" if (
-                                campaign.ends_at and
-                                campaign.ends_at < __import__('datetime').datetime.now(campaign.ends_at.tzinfo)
-                            ) else
-                            "unknown"
-                        )
+                        reason=rejection_reason,
                     )
-                    # Still notify user so they can manually lock
-                    await self.notifier.notify_campaign_dropped(campaign)
+                    # Only notify if campaign is active and might become available
+                    # (skip already_locked / already_submitted — user knows these)
+                    if rejection_reason not in ("already_locked", "already_submitted"):
+                        await self.notifier.notify_campaign_dropped(campaign)
 
             # Update known set
             self._known_campaigns = {c.id for c in raw_campaigns}

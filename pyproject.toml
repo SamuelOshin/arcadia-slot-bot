@@ -29,3 +29,9 @@ dependencies = [
     "structlog>=24.4.0",
     "tenacity>=9.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
+]
