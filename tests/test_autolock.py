@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from app.models import Campaign, SlotLockResult, CampaignFilter
 from app.config import settings
+from app.services.campaign_monitor import CampaignMonitor
 
 
 # ===========================================================================
@@ -556,6 +557,87 @@ class TestLockCampaignRouting:
             result = await client.lock_campaign(campaign.id, force=True)
 
         assert result.success is True
+
+
+# ===========================================================================
+# 5. Campaign Monitor Tests
+# ===========================================================================
+
+class TestCampaignMonitor:
+    @pytest.mark.asyncio
+    async def test_warmup_seeds_and_skips_notifications_and_locking(self):
+        """First check_and_lock call should warm up, seeding raw campaigns, returning interval, and doing no notification/locking."""
+        mock_client = AsyncMock()
+        mock_notifier = AsyncMock()
+        
+        c1 = _make_campaign(id="c1", slots_remaining=5)
+        c2 = _make_campaign(id="c2", slots_remaining=0) # full
+        mock_client.router.list_campaigns.return_value = [c1, c2]
+        
+        monitor = CampaignMonitor(client=mock_client, notifier=mock_notifier)
+        assert monitor._is_warmed_up is False
+        
+        with patch.object(settings, "poll_interval_seconds", 30):
+            interval = await monitor.check_and_lock()
+            
+        assert interval == 30
+        assert monitor._is_warmed_up is True
+        assert monitor._known_campaigns == {"c1", "c2"}
+        mock_notifier.notify_campaign_dropped.assert_not_called()
+        mock_client.auto_lock_available.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_subsequent_poll_detects_new_campaign_and_notifies_and_locks(self):
+        """Subsequent poll detects new campaigns, notifies, and invokes auto-lock."""
+        mock_client = AsyncMock()
+        mock_notifier = AsyncMock()
+        
+        c1 = _make_campaign(id="c1", slots_remaining=5)
+        mock_client.router.list_campaigns.return_value = [c1]
+        
+        monitor = CampaignMonitor(client=mock_client, notifier=mock_notifier)
+        # Manually warm up
+        monitor._is_warmed_up = True
+        monitor._known_campaigns = {"c1"}
+        
+        # New poll has c1, and a new c2
+        c2 = _make_campaign(id="c2", slots_remaining=3)
+        mock_client.router.list_campaigns.return_value = [c1, c2]
+        
+        # Mock auto-lock response
+        mock_client.auto_lock_available.return_value = [
+            SlotLockResult(success=True, campaign_id="c2", campaign_title="Test", message="locked", strategy_used="api", response_time_ms=50)
+        ]
+        
+        with patch.object(settings, "auto_lock_enabled", True):
+            await monitor.check_and_lock()
+            
+        # Should detect c2 as new
+        mock_notifier.notify_campaign_dropped.assert_called_once_with(c2)
+        mock_client.auto_lock_available.assert_called_once_with(campaigns=[c1, c2])
+        assert monitor._known_campaigns == {"c1", "c2"}
+
+    @pytest.mark.asyncio
+    async def test_subsequent_poll_with_no_auto_lock(self):
+        """Subsequent poll notifies but does not lock if auto-lock is disabled."""
+        mock_client = AsyncMock()
+        mock_notifier = AsyncMock()
+        
+        c1 = _make_campaign(id="c1", slots_remaining=5)
+        mock_client.router.list_campaigns.return_value = [c1]
+        
+        monitor = CampaignMonitor(client=mock_client, notifier=mock_notifier)
+        monitor._is_warmed_up = True
+        monitor._known_campaigns = {"c1"}
+        
+        c2 = _make_campaign(id="c2", slots_remaining=3)
+        mock_client.router.list_campaigns.return_value = [c1, c2]
+        
+        with patch.object(settings, "auto_lock_enabled", False):
+            await monitor.check_and_lock()
+            
+        mock_notifier.notify_campaign_dropped.assert_called_once_with(c2)
+        mock_client.auto_lock_available.assert_not_called()
 
 
 # ===========================================================================
