@@ -60,6 +60,7 @@ class APIStrategy(BaseStrategy):
 
         for attempt in range(max_retries + 1):
             try:
+                self.logger.info("api.request_sent", method=method, url=url)
                 async with self.client.request(method, url, **kwargs) as response:
                     text_data = await response.text()
                     json_data = None
@@ -68,6 +69,7 @@ class APIStrategy(BaseStrategy):
                             json_data = await response.json()
                         except Exception:
                             pass
+                    self.logger.info("api.request_done", method=method, url=url, status=response.status)
                     if response.cookies:
                         self.session.update_cookies_from_response(response.cookies)
                     if response.status in (401, 403):
@@ -79,6 +81,7 @@ class APIStrategy(BaseStrategy):
                             continue
                     return response.status, json_data, text_data, dict(response.headers)
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                self.logger.warning("api.request_error", method=method, url=url, error=repr(e))
                 last_err = e
                 if attempt == max_retries:
                     break
