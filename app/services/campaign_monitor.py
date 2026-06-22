@@ -68,8 +68,6 @@ class CampaignMonitor:
                 for c in raw_campaigns:
                     slots = c.slotsRemaining if c.slotsRemaining is not None else float('inf')
                     is_full = slots <= 0
-                    if c.reservation:
-                        eligible = c.reservation.get("reservedEligibleForMe", False)
                     if c.status == "active":
                         self._last_campaign_states[c.id] = {
                             "slots_available": not is_full,
@@ -77,6 +75,7 @@ class CampaignMonitor:
                         }
                 return next_interval
 
+            for c in raw_campaigns:
                 if c.id not in self._known_campaigns:
                     new_campaigns.append(c)
 
