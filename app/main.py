@@ -25,11 +25,17 @@ from app.services.campaign_monitor import CampaignMonitor
 # Configure structured logging
 from app.services.telegram_bot import structlog_memory_buffer_processor
 
+renderer = (
+    structlog.processors.JSONRenderer()
+    if settings.log_format.lower() == "json"
+    else structlog.dev.ConsoleRenderer(colors=False)
+)
+
 structlog.configure(
     processors=[
         structlog.processors.TimeStamper(fmt="iso"),
         structlog_memory_buffer_processor,
-        structlog.processors.JSONRenderer(),
+        renderer,
     ],
     wrapper_class=structlog.make_filtering_bound_logger(settings.log_level),
     context_class=dict,

@@ -72,6 +72,7 @@ class BotConfig(BaseSettings):
     host: str = Field(default="0.0.0.0", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_format: str = Field(default="text", alias="LOG_FORMAT")
     environment: str = Field(default="development", alias="ENVIRONMENT")
 
     # ── Monitoring ────────────────────────────────────────
