@@ -341,6 +341,7 @@ class TestApiListCampaignsFailures:
 
         with pytest.raises(TimeoutError):
             await strategy.list_campaigns()
+        strategy._request.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_list_campaigns_raises_on_non_200_status(self):
@@ -354,6 +355,7 @@ class TestApiListCampaignsFailures:
 
         with pytest.raises(RuntimeError, match="status 500"):
             await strategy.list_campaigns()
+        strategy._request.assert_called_once()
 
 
 # ===========================================================================

@@ -121,7 +121,7 @@ class APIStrategy(BaseStrategy):
                 raise AuthError("API authentication failed")
             else:
                 self.logger.error("api.list_failed", status=status)
-                raise RuntimeError(f"API list_campaigns failed with status {status}")
+                raise RuntimeError(f"API list_campaigns failed with status {status} for {url}")
 
         except AuthError:
             raise
