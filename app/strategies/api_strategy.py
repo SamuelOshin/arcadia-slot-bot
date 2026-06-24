@@ -121,13 +121,13 @@ class APIStrategy(BaseStrategy):
                 raise AuthError("API authentication failed")
             else:
                 self.logger.error("api.list_failed", status=status)
+                raise RuntimeError(f"API list_campaigns failed with status {status} for {url}")
 
         except AuthError:
             raise
         except Exception as e:
             self.logger.error("api.list_campaigns_error", error=repr(e))
-
-        return []
+            raise
 
     # --- claim_slot campaign constants ---
     MAX_SLOT_ATTEMPTS = 10         # give up after this many collisions

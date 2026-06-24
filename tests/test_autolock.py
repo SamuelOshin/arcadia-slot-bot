@@ -325,7 +325,41 @@ class TestFastLock:
 
 
 # ===========================================================================
-# 4. auto_lock_available routing — claim_slot vs fast_lock
+# 4. API list_campaigns failover behavior
+# ===========================================================================
+
+class TestApiListCampaignsFailures:
+    @pytest.mark.asyncio
+    async def test_list_campaigns_propagates_request_timeout(self):
+        """Timeouts must propagate so StrategyRouter can fail over to fallback strategies."""
+        from app.strategies.api_strategy import APIStrategy
+
+        strategy = APIStrategy.__new__(APIStrategy)
+        strategy.base_url = "https://arcadia-roster.up.railway.app/api"
+        strategy.logger = MagicMock()
+        strategy._request = AsyncMock(side_effect=TimeoutError("request timed out"))
+
+        with pytest.raises(TimeoutError):
+            await strategy.list_campaigns()
+        strategy._request.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_list_campaigns_raises_on_non_200_status(self):
+        """Non-auth HTTP failures must propagate for strategy fallback."""
+        from app.strategies.api_strategy import APIStrategy
+
+        strategy = APIStrategy.__new__(APIStrategy)
+        strategy.base_url = "https://arcadia-roster.up.railway.app/api"
+        strategy.logger = MagicMock()
+        strategy._request = AsyncMock(return_value=(500, None, "", {}))
+
+        with pytest.raises(RuntimeError, match="status 500"):
+            await strategy.list_campaigns()
+        strategy._request.assert_called_once()
+
+
+# ===========================================================================
+# 5. auto_lock_available routing — claim_slot vs fast_lock
 # ===========================================================================
 
 class TestAutoLockRouting:
@@ -474,7 +508,7 @@ class TestAutoLockRouting:
 
 
 # ===========================================================================
-# 5. lock_campaign routes correctly based on campaign type
+# 6. lock_campaign routes correctly based on campaign type
 # ===========================================================================
 
 class TestLockCampaignRouting:
@@ -560,7 +594,7 @@ class TestLockCampaignRouting:
 
 
 # ===========================================================================
-# 5. Campaign Monitor Tests
+# 7. Campaign Monitor Tests
 # ===========================================================================
 
 class TestCampaignMonitor:
