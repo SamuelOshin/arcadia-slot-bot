@@ -38,10 +38,9 @@ class AIAgentStrategy(BaseStrategy):
             return self._agent
 
         try:
-            from browser_use import Agent, Browser, BrowserConfig
-            from langchain_openai import ChatOpenAI
+            from browser_use import Agent, Browser, ChatOpenAI
 
-            self._browser = Browser(config=BrowserConfig(headless=True))
+            self._browser = Browser(headless=True)
 
             llm = ChatOpenAI(
                 model=settings.ai_agent_model,
@@ -181,4 +180,4 @@ class AIAgentStrategy(BaseStrategy):
 
     async def close(self):
         if self._browser:
-            await self._browser.close()
+            await self._browser.stop()
