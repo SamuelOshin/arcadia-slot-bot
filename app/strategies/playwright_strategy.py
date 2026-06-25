@@ -110,10 +110,15 @@ class PlaywrightStrategy(BaseStrategy):
                         const parts = href.split('/');
                         const id = parts[parts.length - 1] || '';
                         
-                        const titleEl = card.querySelector('h1, h2, h3, h4, p, [class*="title"]');
-                        const title = titleEl ? titleEl.textContent.trim() : card.textContent.trim();
+                        const headerEl = card.querySelector('h1, h2, h3, h4, [class*="title"], [class*="header"]');
+                        let title = headerEl ? headerEl.textContent.trim() : '';
                         
-                        return { id, title };
+                        const fullText = card.textContent.trim();
+                        if (!title) {
+                            title = fullText.split('\\n')[0].trim() || id;
+                        }
+                        
+                        return { id, title, fullText };
                     });
                 }
             """)
@@ -122,22 +127,79 @@ class PlaywrightStrategy(BaseStrategy):
 
             # Convert to Campaign models (best effort)
             result = []
+            import re
             for c in campaigns:
-                if c.get("id"):
-                    result.append(Campaign(
-                        _id=c["id"],
-                        campaignCode=c["id"],
-                        title=c["title"] or c["id"],
-                        description="",
-                        startDate=datetime.utcnow(),
-                        endDate=datetime.utcnow() + timedelta(days=7),
-                        maxSlots=100,
-                        slotsLocked=0,
-                        slotsRemaining=1,
-                        kind="ugc",
-                        status="active",
-                        postPrice=10.0,
-                    ))
+                if not c.get("id"):
+                    continue
+                
+                full_text = c.get("fullText", "")
+                full_text_lower = full_text.lower()
+                
+                # Parse slots remaining
+                slots_remaining = 1
+                if "full" in full_text_lower or "0 left" in full_text_lower or "0 slots" in full_text_lower:
+                    slots_remaining = 0
+                elif "posts" in full_text_lower:
+                    match = re.search(r'(\d+)\s*/\s*(\d+)\s+posts', full_text_lower)
+                    if match:
+                        locked, total = int(match.group(1)), int(match.group(2))
+                        if locked >= total:
+                            slots_remaining = 0
+                
+                # Parse myLock and mySubmission
+                my_lock = None
+                my_submission = None
+                if "submitted" in full_text_lower or "clip submitted" in full_text_lower:
+                    my_submission = {"_id": "scraped", "status": "submitted"}
+                if "locked" in full_text_lower or "slot locked" in full_text_lower:
+                    my_lock = {"slotNumber": 1, "status": "locked"}
+                
+                # Parse endDate (best effort, e.g., "ends 6/9/2026" or "ends 2026-06-09")
+                end_date = datetime.utcnow() + timedelta(days=7)
+                date_match = re.search(r'ends\s+(\d{1,2})[/-](\d{1,2})[/-](\d{4})', full_text_lower)
+                if date_match:
+                    try:
+                        month, day, year = int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3))
+                        end_date = datetime(year, month, day, 23, 59, 59)
+                    except Exception:
+                        pass
+                else:
+                    iso_match = re.search(r'ends\s+(\d{4})[/-](\d{1,2})[/-](\d{1,2})', full_text_lower)
+                    if iso_match:
+                        try:
+                            year, month, day = int(iso_match.group(1)), int(iso_match.group(2)), int(iso_match.group(3))
+                            end_date = datetime(year, month, day, 23, 59, 59)
+                        except Exception:
+                            pass
+                
+                # Determine status
+                status = "active"
+                if slots_remaining == 0 or end_date < datetime.utcnow():
+                    status = "locked"
+                
+                # Clean up title: if the scraped title is too long or contains the full text, trim it
+                title = c["title"]
+                if len(title) > 100 or "\n" in title:
+                    title = title.split("\n")[0].strip()
+                if len(title) > 80:
+                    title = title[:77] + "..."
+
+                result.append(Campaign(
+                    _id=c["id"],
+                    campaignCode=c["id"],
+                    title=title,
+                    description="",
+                    startDate=datetime.utcnow() - timedelta(days=1),
+                    endDate=end_date,
+                    maxSlots=100,
+                    slotsLocked=100 - slots_remaining,
+                    slotsRemaining=slots_remaining,
+                    kind="ugc",
+                    status=status,
+                    postPrice=10.0,
+                    myLock=my_lock,
+                    mySubmission=my_submission,
+                ))
 
             return result
 
