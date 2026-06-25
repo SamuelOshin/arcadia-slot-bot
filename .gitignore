@@ -21,4 +21,3 @@ data/
 *.sln
 *.swp
 .DS_Store
-.gitignore
