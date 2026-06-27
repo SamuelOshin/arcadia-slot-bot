@@ -25,6 +25,8 @@ class ArcadiaClient:
         self._slots_locked_today = 0
         self._last_reset = date.today()
         self._locked_campaigns: set = set()
+        self._cycle_filter_rejections: dict[str, int] = {}
+        self._last_cycle_summary: Optional[dict] = None
         self.logger = logger.bind(component="arcadia_client")
 
     def _check_quota(self) -> bool:
@@ -36,6 +38,12 @@ class ArcadiaClient:
             self._locked_campaigns.clear()
 
         return self._slots_locked_today < settings.campaign_filter_max_slots_per_day
+
+    def _log_filter_skip(self, c: Campaign, reason: str, **extra) -> None:
+        """Log filter rejection at DEBUG or WARNING depending on verbose mode."""
+        self._cycle_filter_rejections[reason] = self._cycle_filter_rejections.get(reason, 0) + 1
+        log_fn = self.logger.warning if settings.lock_verbose_logging else self.logger.debug
+        log_fn("client.filter_skip", campaign_id=c.id, title=c.title, reason=reason, **extra)
 
     def _filter_campaigns(
         self,
@@ -53,12 +61,12 @@ class ArcadiaClient:
         for c in campaigns:
             # Skip already locked
             if c.id in self._locked_campaigns:
-                self.logger.debug("client.filter_skip", campaign_id=c.id, reason="already_locked_by_bot")
+                self._log_filter_skip(c, "already_locked_by_bot")
                 continue
 
             # Skip if not lockable
             if not c.is_lockable:
-                self.logger.debug("client.filter_skip", campaign_id=c.id, title=c.title, reason="not_lockable",
+                self._log_filter_skip(c, "not_lockable",
                     my_lock=c.myLock is not None,
                     my_submission=c.mySubmission is not None,
                     slots_remaining=c.slotsRemaining,
@@ -78,7 +86,7 @@ class ArcadiaClient:
                     gen_locked = c.reservation.get("generalLocked", 0)
                     gen_available = gen_capacity - gen_locked
                     if gen_available <= 0:
-                        self.logger.debug("client.filter_skip", campaign_id=c.id, reason="general_slots_full",
+                        self._log_filter_skip(c, "general_slots_full",
                             gen_capacity=gen_capacity, gen_locked=gen_locked)
                         continue
                 else:
@@ -89,12 +97,12 @@ class ArcadiaClient:
                     res_locked = c.reservation.get("reservedLocked", 0)
                     total_available = (gen_capacity - gen_locked) + (res_total - res_locked)
                     if total_available <= 0:
-                        self.logger.debug("client.filter_skip", campaign_id=c.id, reason="all_slots_full_reserved_eligible")
+                        self._log_filter_skip(c, "all_slots_full_reserved_eligible")
                         continue
 
             # Minimum payout filter
             if filters.min_payout and c.payout_amount < filters.min_payout:
-                self.logger.debug("client.filter_skip", campaign_id=c.id, reason="below_min_payout",
+                self._log_filter_skip(c, "below_min_payout",
                     payout=c.payout_amount, min_payout=filters.min_payout)
                 continue
 
@@ -221,12 +229,38 @@ class ArcadiaClient:
         if not settings.auto_lock_enabled:
             return []
 
+        # Reset cycle diagnostics
+        self._cycle_filter_rejections = {}
+        total_raw = len(campaigns) if campaigns else 0
+
+        # Log circuit breaker state before starting
+        try:
+            cb_state = await self.router.circuit_breaker.get_state("api")
+            self.logger.info("client.auto_lock_circuit_state", api_state=cb_state.value)
+        except Exception:
+            pass
+
         if campaigns is None:
             campaigns = await self.get_available_campaigns(filters)
         else:
             campaigns = self._filter_campaigns(campaigns, filters)
 
+        total_filtered = total_raw - len(campaigns)
+
         if not campaigns:
+            self._last_cycle_summary = {
+                "total_raw": total_raw,
+                "total_filtered": total_filtered,
+                "filter_rejections": dict(self._cycle_filter_rejections),
+                "attempted": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "failures": {},
+                "response_times": [],
+            }
+            self.logger.info("client.auto_lock_none_available",
+                total_raw=total_raw, filtered=total_filtered,
+                rejections=dict(self._cycle_filter_rejections))
             return []
 
         # Sort campaigns by score descending
@@ -234,6 +268,10 @@ class ArcadiaClient:
         for c in campaigns:
             score = self.score_campaign(c)
             scored_campaigns.append((score, c))
+            if settings.lock_verbose_logging:
+                self.logger.info("client.campaign_score",
+                    campaign_id=c.id, title=c.title, score=score,
+                    payout=c.payout_amount, slots=c.slots_remaining, kind=c.kind)
         
         scored_campaigns.sort(key=lambda x: x[0], reverse=True)
         sorted_campaigns = [c for _, c in scored_campaigns]
@@ -242,6 +280,13 @@ class ArcadiaClient:
         quota_remaining = max(0, settings.campaign_filter_max_slots_per_day - self._slots_locked_today)
         if quota_remaining <= 0:
             self.logger.info("client.quota_exhausted_on_autolock")
+            self._last_cycle_summary = {
+                "total_raw": total_raw,
+                "total_filtered": total_filtered,
+                "filter_rejections": dict(self._cycle_filter_rejections),
+                "attempted": 0,
+                "reason": "quota_exhausted",
+            }
             return []
 
         # Limit to the max concurrent allowed, and no more than the remaining daily quota
@@ -251,14 +296,17 @@ class ArcadiaClient:
         if not campaigns_to_attempt:
             return []
 
-        self.logger.info("client.auto_lock_concurrent_start", count=len(campaigns_to_attempt))
+        self.logger.info("client.auto_lock_concurrent_start",
+            count=len(campaigns_to_attempt),
+            campaigns=[c.title for c in campaigns_to_attempt])
 
         # We will use fast_lock concurrently, but branch for claim_slot campaigns
         tasks = []
         api_strategy = self.router._get_strategy("api")
         for c in campaigns_to_attempt:
             if c.needs_claim:
-                self.logger.info("client.auto_lock.claim_slot_path", campaign_id=c.id)
+                self.logger.info("client.auto_lock.claim_slot_path",
+                    campaign_id=c.id, title=c.title)
                 tasks.append(api_strategy.lock_slot_for_claim_campaign(c))
             else:
                 tasks.append(self.fast_lock_campaign(c.id))
@@ -266,36 +314,78 @@ class ArcadiaClient:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         processed_results = []
+        cycle_succeeded = 0
+        cycle_failures: dict[str, int] = {}
+        cycle_response_times: list[float] = []
+
         for i, result in enumerate(results):
             cid = campaigns_to_attempt[i].id
+            title = campaigns_to_attempt[i].title
             if isinstance(result, Exception):
-                self.logger.error("client.auto_lock_concurrent_exception", campaign_id=cid, error=str(result))
+                self.logger.error("client.auto_lock_concurrent_exception",
+                    campaign_id=cid, title=title, error=str(result))
                 processed_results.append(SlotLockResult(
                     success=False,
                     campaign_id=cid,
-                    campaign_title=campaigns_to_attempt[i].title,
+                    campaign_title=title,
                     message=f"Concurrent exception: {str(result)}",
                     strategy_used="concurrent",
                     response_time_ms=0,
                 ))
+                cycle_failures["exception"] = cycle_failures.get("exception", 0) + 1
+                cycle_response_times.append(0)
             else:
                 processed_results.append(result)
+                cycle_response_times.append(result.response_time_ms)
                 if result.success:
-                    # Update quota
                     self._slots_locked_today += 1
                     self._locked_campaigns.add(cid)
+                    cycle_succeeded += 1
                     self.logger.info(
                         "client.slot_locked",
-                        campaign=cid,
+                        campaign=cid, title=title,
                         daily_count=self._slots_locked_today,
                     )
                 else:
-                    # Near-miss notification: if result was a 409 conflict, we trigger a near-miss alert!
-                    if result.message == "taken":
-                        # Fire task to notify near miss
-                        asyncio.create_task(self.router.notifier.notify_near_miss(campaigns_to_attempt[i], result.response_time_ms))
+                    # Categorize failure by message prefix
+                    msg = result.message
+                    if msg == "taken" or "conflict" in msg or "taken" in msg:
+                        cat = "taken"
+                        asyncio.create_task(self.router.notifier.notify_near_miss(
+                            campaigns_to_attempt[i], result.response_time_ms))
+                    elif "bad_request" in msg or "400" in msg:
+                        cat = "bad_request"
+                    elif "rate_limited" in msg or "429" in msg:
+                        cat = "rate_limited"
+                    elif "quota" in msg:
+                        cat = "quota"
+                    else:
+                        cat = "other"
+                    cycle_failures[cat] = cycle_failures.get(cat, 0) + 1
+                    self.logger.warning("client.auto_lock_failed",
+                        campaign=cid, title=title, reason=msg, category=cat)
+
+        # Store cycle summary for caller
+        total_attempted = len(processed_results)
+        avg_response = sum(cycle_response_times) / len(cycle_response_times) if cycle_response_times else 0
+        self._last_cycle_summary = {
+            "total_raw": total_raw,
+            "total_filtered": total_filtered,
+            "filter_rejections": dict(self._cycle_filter_rejections),
+            "attempted": total_attempted,
+            "succeeded": cycle_succeeded,
+            "failed": total_attempted - cycle_succeeded,
+            "failures": cycle_failures,
+            "avg_response_ms": round(avg_response, 1),
+        }
+
+        self.logger.info("client.auto_lock_cycle_complete", **self._last_cycle_summary)
 
         return processed_results
+
+    def get_last_cycle_summary(self) -> Optional[dict]:
+        """Get the most recent auto-lock cycle summary."""
+        return self._last_cycle_summary
 
     def get_stats(self) -> dict:
         """Get client statistics."""

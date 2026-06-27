@@ -2,6 +2,8 @@
 
 Polls for new campaigns, detects drops, and triggers locks.
 """
+import json
+import os
 from typing import Set, Optional
 from datetime import datetime
 import structlog
@@ -38,7 +40,76 @@ class CampaignMonitor:
         self._last_check: Optional[datetime] = None
         self._last_campaign_states: dict[str, dict] = {}
         self._is_warmed_up: bool = False   # True after first silent poll
+        self._known_path: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "known_campaigns.json")
+        self._load_known_campaigns()
         self.logger = logger.bind(component="campaign_monitor")
+
+    def _load_known_campaigns(self) -> None:
+        """Load known campaign IDs from disk (survives restarts)."""
+        try:
+            if os.path.exists(self._known_path):
+                with open(self._known_path, "r") as f:
+                    data = json.load(f)
+                self._known_campaigns = set(data.get("ids", []))
+                self.logger.info("monitor.known_loaded", count=len(self._known_campaigns), path=self._known_path)
+        except Exception as e:
+            self.logger.warning("monitor.known_load_failed", error=str(e))
+            self._known_campaigns = set()
+
+    def _save_known_campaigns(self) -> None:
+        """Persist known campaign IDs to disk."""
+        try:
+            os.makedirs(os.path.dirname(self._known_path), exist_ok=True)
+            with open(self._known_path, "w") as f:
+                json.dump({"ids": list(self._known_campaigns)}, f)
+        except Exception as e:
+            self.logger.warning("monitor.known_save_failed", error=str(e))
+
+    async def _send_autolock_summary(self, summary: dict) -> None:
+        """Send a Telegram summary of the auto-lock cycle."""
+        if not settings.telegram_bot_token or not settings.telegram_chat_id:
+            return
+
+        attempted = summary.get("attempted", 0)
+        succeeded = summary.get("succeeded", 0)
+        failed = summary.get("failed", 0)
+        avg_ms = summary.get("avg_response_ms", 0)
+        failures = summary.get("failures", {})
+        total_raw = summary.get("total_raw", 0)
+        total_filtered = summary.get("total_filtered", 0)
+        rejections = summary.get("filter_rejections", {})
+
+        # Build failure detail string
+        failure_parts = []
+        for cat, count in sorted(failures.items()):
+            label = {"taken": "taken", "bad_request": "bad_req", "rate_limited": "rate_limit",
+                     "quota": "quota", "exception": "error", "other": "other"}.get(cat, cat)
+            failure_parts.append(f"{count} {label}")
+        failure_str = ", ".join(failure_parts) if failure_parts else "none"
+
+        # Build filter detail (only show non-zero)
+        filter_parts = []
+        for reason, count in sorted(rejections.items(), key=lambda x: -x[1]):
+            filter_parts.append(f"{count} {reason}")
+        filter_str = ", ".join(filter_parts[:3])  # top 3
+        if len(filter_parts) > 3:
+            filter_str += f" +{len(filter_parts)-3} more"
+
+        lines = [
+            f"🔁 <b>Auto-Lock Cycle</b>",
+            f"• {total_raw} checked, {total_filtered} filtered",
+        ]
+        if filter_parts:
+            lines.append(f"  └ {filter_str}")
+        lines.append(f"• {attempted} attempted → {succeeded} ✅, {failed} ❌ ({failure_str})")
+        lines.append(f"• Avg response: {avg_ms}ms")
+
+        message = "\n".join(lines)
+        await self.notifier._send_telegram(
+            chat_id=settings.telegram_chat_id.split(",")[0].strip(),
+            message=message,
+        )
+        self.logger.info("monitor.autolock_summary_sent", summary=summary)
 
     async def check_and_lock(self) -> int:
         """Main monitoring loop — check campaigns, act, and return next poll interval."""
@@ -58,6 +129,7 @@ class CampaignMonitor:
             # campaign that was already running before the restart.
             if not self._is_warmed_up:
                 self._known_campaigns = {c.id for c in raw_campaigns}
+                self._save_known_campaigns()
                 self._is_warmed_up = True
                 self._last_check = datetime.utcnow()
                 self.logger.info(
@@ -160,13 +232,14 @@ class CampaignMonitor:
                         title=campaign.title,
                         reason=rejection_reason,
                     )
-                    # Only notify if campaign is active and might become available
-                    # (skip already_locked / already_submitted — user knows these)
-                    if rejection_reason not in ("already_locked", "already_submitted"):
+                    # Only notify if campaign is active and might become available later.
+                    # Skip expired, no-slots, locked, submitted — user can't act on these.
+                    if rejection_reason not in ("already_locked", "already_submitted", "no_slots", "expired", "status_not_active", "unknown"):
                         await self.notifier.notify_campaign_dropped(campaign)
 
             # Update known set
             self._known_campaigns = {c.id for c in raw_campaigns}
+            self._save_known_campaigns()
             self._last_check = datetime.utcnow()
 
             # Auto-lock if enabled (pass raw campaigns to reuse connection results concurrently)
@@ -174,9 +247,14 @@ class CampaignMonitor:
                 results = await self.client.auto_lock_available(campaigns=raw_campaigns)
                 for r in results:
                     if r.success:
-                        self.logger.info("monitor.auto_locked", campaign=r.campaign_id)
+                        self.logger.info("monitor.auto_locked", campaign=r.campaign_id, title=r.campaign_title)
                     else:
-                        self.logger.warning("monitor.auto_lock_failed", campaign=r.campaign_id, reason=r.message)
+                        self.logger.warning("monitor.auto_lock_failed", campaign=r.campaign_id, title=r.campaign_title, reason=r.message)
+
+                # Send Telegram summary if any lock was attempted
+                summary = self.client.get_last_cycle_summary()
+                if summary and summary.get("attempted", 0) > 0:
+                    await self._send_autolock_summary(summary)
 
             # Determine next dynamic interval trigger
             if recently_filled:

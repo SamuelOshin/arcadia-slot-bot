@@ -630,6 +630,16 @@ class APIStrategy(BaseStrategy):
             status, data, resp_text, headers = await self._request("POST", url, json={})
             elapsed_ms = (time.time() - start_time) * 1000
 
+            # Verbose: log full response body for all non-2xx
+            if settings.lock_verbose_logging and status not in (200, 201):
+                self.logger.warning(
+                    "api.fast_lock.verbose_response",
+                    campaign_id=campaign_id,
+                    status=status,
+                    body=resp_text[:1000],
+                    headers=dict(headers),
+                )
+
             if status in (200, 201):
                 slot_num = None
                 title = campaign_id
