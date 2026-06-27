@@ -30,6 +30,7 @@ class BotConfig(BaseSettings):
     campaign_filter_max_slots_per_day: int = Field(default=3, alias="CAMPAIGN_FILTER_MAX_SLOTS_PER_DAY")
     auto_lock_enabled: bool = Field(default=False, alias="AUTO_LOCK_ENABLED")
     auto_lock_max_concurrent: int = Field(default=2, alias="AUTO_LOCK_MAX_CONCURRENT")
+    lock_verbose_logging: bool = Field(default=False, alias="LOCK_VERBOSE_LOGGING")
 
     # ── Strategy Configuration ────────────────────────────
     strategy_priority: Any = Field(default=["api", "playwright", "ai_agent"], alias="STRATEGY_PRIORITY")
