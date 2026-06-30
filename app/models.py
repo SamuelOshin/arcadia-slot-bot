@@ -76,7 +76,7 @@ class Campaign(BaseModel):
 
     @property
     def needs_claim(self) -> bool:
-        return self.ugcSlotMode == "claim_slot"
+        return self.ugcSlotMode == "claim_slot" or self.kind == "scheduled"
 
     def eligible_slots(self) -> List[dict]:
         """Return claimable slots from scheduledSlots for the current user.

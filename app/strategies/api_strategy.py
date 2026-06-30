@@ -498,7 +498,7 @@ class APIStrategy(BaseStrategy):
 
             attempts += 1
 
-            # Build request body — try all known candidate field names defensively
+            # Build request body — the API expects slotLockId from the detail endpoint
             slot_id = slot.get("_id") or slot.get("id")
             slot_number = (
                 slot.get("slotNumber")
@@ -508,9 +508,7 @@ class APIStrategy(BaseStrategy):
             )
             body: dict = {}
             if slot_id:
-                body["slotId"] = slot_id
-            if slot_number is not None:
-                body["slotNumber"] = slot_number
+                body["slotLockId"] = slot_id
 
             self.logger.info(
                 "api.claim_slot.attempt",
