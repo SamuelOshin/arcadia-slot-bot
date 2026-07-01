@@ -41,8 +41,8 @@ class CampaignMonitor:
         self._last_campaign_states: dict[str, dict] = {}
         self._is_warmed_up: bool = False   # True after first silent poll
         self._known_path: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "known_campaigns.json")
-        self._load_known_campaigns()
         self.logger = logger.bind(component="campaign_monitor")
+        self._load_known_campaigns()
 
     def _load_known_campaigns(self) -> None:
         """Load known campaign IDs from disk (survives restarts)."""
