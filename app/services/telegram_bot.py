@@ -220,8 +220,25 @@ class TelegramBotService:
     async def show_status(self, update: Update) -> None:
         """Helper to generate and output status message."""
         scheduler_health = "🟢 Active" if self.scheduler._running else "🔴 Paused"
-        session_valid = "✅ Valid" if self.monitor.session.is_valid else "❌ Invalid / Expired"
-        
+
+        # Perform a real live session check by pinging the campaigns endpoint.
+        # The old `is_valid` only checked if the cookie string was non-empty in memory
+        # (never expired, never pinged the server), so it always showed ✅ Valid even
+        # when every API call was returning 403.
+        try:
+            api = self.monitor.client.router._get_strategy("api")
+            live_status, _, _, _ = await api._request(
+                "GET",
+                f"{api.base_url}/clip/campaigns",
+                timeout=__import__("aiohttp").ClientTimeout(total=5.0),
+            )
+            if live_status == 200:
+                session_valid = "✅ Live (200 OK)"
+            else:
+                session_valid = f"❌ Dead (HTTP {live_status})"
+        except Exception as e:
+            session_valid = f"⚠️ Check failed ({type(e).__name__})"
+
         last_check_str = "Never"
         if self.monitor._last_check:
             seconds_ago = int((datetime.utcnow() - self.monitor._last_check).total_seconds())
@@ -259,6 +276,7 @@ class TelegramBotService:
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(message, parse_mode="HTML", reply_markup=reply_markup)
+
 
     async def show_campaigns(self, update: Update) -> None:
         """Fetch and list open campaigns with locking inline buttons."""

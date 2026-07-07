@@ -125,9 +125,13 @@ class SessionManager:
 
     @property
     def is_valid(self) -> bool:
-        """Check if current session is valid (not expired)."""
-        if self._expires_at and datetime.utcnow() > self._expires_at:
-            return False
+        """Check if current session has credentials in memory (NOT a live server check).
+        
+        This only confirms credentials are present — it does NOT verify the server
+        accepts them. Use check_live_session() for a real connectivity test.
+        The _expires_at field is intentionally unused (never set) — expiry is
+        detected live when the API returns 401/403.
+        """
         return bool(self._token or self._cookie or self.get_session_token())
 
     @property
@@ -136,10 +140,16 @@ class SessionManager:
         if self._cookie:
             cleaned_cookies = "; ".join(f"{k}={v}" for k, v in self.cookie_jar.items())
             return {
-                "Accept": "*/*",
+                "Accept": "application/json, */*",
                 "Accept-Encoding": "gzip, deflate, br, zstd",
                 "Accept-Language": "en-US,en;q=0.9",
+                # Content-Type is required for POST requests with a JSON body.
+                # Without this, aiohttp's automatic Content-Type gets suppressed because
+                # we pass a fully explicit headers dict, causing the server to reject
+                # POST /lock requests with 400 or 403.
+                "Content-Type": "application/json",
                 "Cookie": cleaned_cookies,  # cleaned Next-Auth cookie string
+                "Origin": "https://arcadia-roster.up.railway.app",
                 "Referer": "https://arcadia-roster.up.railway.app/clip/campaigns",
                 "Sec-Ch-Ua": '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
                 "Sec-Ch-Ua-Mobile": "?0",
