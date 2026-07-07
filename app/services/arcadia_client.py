@@ -353,6 +353,10 @@ class ArcadiaClient:
                         cat = "taken"
                         asyncio.create_task(self.router.notifier.notify_near_miss(
                             campaigns_to_attempt[i], result.response_time_ms))
+                    elif "auth_failure" in msg or "session expired" in msg.lower():
+                        cat = "auth_failure"
+                    elif "permission_denied" in msg:
+                        cat = "permission_denied"
                     elif "bad_request" in msg or "400" in msg:
                         cat = "bad_request"
                     elif "rate_limited" in msg or "429" in msg:

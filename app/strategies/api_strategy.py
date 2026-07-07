@@ -73,12 +73,44 @@ class APIStrategy(BaseStrategy):
                     if response.cookies:
                         self.session.update_cookies_from_response(response.cookies)
                     if response.status in (401, 403):
-                        self.logger.warning("api.auth_failed_in_request", status=response.status)
-                        if await self.session.refresh():
-                            # Re-inject headers and cookies for retry
-                            kwargs["headers"] = self.session.headers
-                            kwargs["cookies"] = self.session.cookie_jar
-                            continue
+                        # Always log the body so we know exactly what the server said.
+                        self.logger.warning(
+                            "api.auth_failed_in_request",
+                            status=response.status,
+                            body=text_data[:500],
+                        )
+                        # Determine if this is a genuine auth failure or a business/permission
+                        # rejection. GET calls returning 200 while POST /lock returns 403 usually
+                        # means the session is fine but a header or eligibility check failed.
+                        # Only attempt refresh for genuine auth signals.
+                        body_lower = text_data.lower()
+                        is_auth_failure = (
+                            response.status == 401
+                            or any(kw in body_lower for kw in (
+                                "unauthorized", "unauthenticated", "session", "token",
+                                "authentication", "not authenticated", "sign in",
+                                "log in", "please login",
+                            ))
+                        )
+                        if is_auth_failure:
+                            refreshed = await self.session.refresh()
+                            if refreshed:
+                                # Re-inject headers and cookies for retry
+                                kwargs["headers"] = self.session.headers
+                                kwargs["cookies"] = self.session.cookie_jar
+                                continue
+                            else:
+                                # Refresh failed — raise immediately so callers can handle it cleanly.
+                                raise AuthError(f"Session expired and refresh failed (HTTP {response.status}): {text_data[:200]}")
+                        else:
+                            # Permission/business 403 — return it as-is; caller decides what to do.
+                            self.logger.warning(
+                                "api.permission_denied",
+                                status=response.status,
+                                method=method,
+                                url=url,
+                                body=text_data[:300],
+                            )
                     return response.status, json_data, text_data, dict(response.headers)
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 self.logger.warning("api.request_error", method=method, url=url, error=repr(e))
@@ -244,7 +276,18 @@ class APIStrategy(BaseStrategy):
                 )
 
             elif status in (401, 403):
-                raise AuthError("API authentication failed during lock")
+                # _request() handles genuine auth 403s by raising AuthError before reaching here.
+                # If we get here with 403, it's a business/permission rejection from the server.
+                error_detail = self._parse_error(data, resp_text)
+                return SlotLockResult(
+                    success=False,
+                    campaign_id=campaign_id,
+                    campaign_title=campaign_id,
+                    message=f"permission_denied (HTTP {status}): {error_detail}",
+                    strategy_used=self.name,
+                    response_time_ms=elapsed_ms,
+                    definitive=True,
+                )
 
             elif status == 404:
                 # Try fallback endpoints
@@ -575,7 +618,26 @@ class APIStrategy(BaseStrategy):
                 continue  # Instant next slot
 
             elif status in (401, 403):
-                raise AuthError("Auth failed during slot claim attempt")
+                # This branch is now only reached if _request() somehow returns 403 without
+                # raising (e.g. if future code changes remove the raise). Keep it as a safety net.
+                # Return a SlotLockResult instead of raising so asyncio.gather doesn't swallow
+                # it as a generic Exception — the auth_failure category will surface in summaries.
+                elapsed_ms = (time.time() - start_time) * 1000
+                self.logger.error(
+                    "api.claim_slot.auth_failure",
+                    campaign_id=campaign_id,
+                    attempt=attempts,
+                    slot_id=slot_id,
+                )
+                return SlotLockResult(
+                    success=False,
+                    campaign_id=campaign_id,
+                    campaign_title=campaign_title,
+                    message="auth_failure: session expired during slot claim — update ARCADIA_SESSION_COOKIE",
+                    strategy_used=self.name,
+                    response_time_ms=elapsed_ms,
+                    definitive=True,
+                )
 
             else:
                 # Unexpected error on this slot — stop the whole sequence
@@ -690,7 +752,18 @@ class APIStrategy(BaseStrategy):
                     definitive=True,
                 )
             elif status in (401, 403):
-                raise AuthError("Auth failed in fast_lock")
+                # _request() handles genuine auth 403s (raises AuthError). If we reach here,
+                # it's a business/permission rejection — return it cleanly.
+                error_detail = self._parse_error(data, resp_text)
+                return SlotLockResult(
+                    success=False,
+                    campaign_id=campaign_id,
+                    campaign_title=campaign_id,
+                    message=f"permission_denied (HTTP {status}): {error_detail}",
+                    strategy_used="api-fast",
+                    response_time_ms=elapsed_ms,
+                    definitive=True,
+                )
             else:
                 self.logger.warning(
                     "api.fast_lock.unexpected_status",
