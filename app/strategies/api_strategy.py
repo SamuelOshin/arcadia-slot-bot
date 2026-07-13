@@ -564,6 +564,8 @@ class APIStrategy(BaseStrategy):
             url = f"{self.base_url}/clip/campaigns/{campaign_id}/lock"
             try:
                 status, data, resp_text, headers = await self._request("POST", url, json=body)
+            except AuthError:
+                raise
             except Exception as e:
                 self.logger.error("api.claim_slot.request_error", campaign_id=campaign_id, error=str(e))
                 continue
@@ -618,26 +620,27 @@ class APIStrategy(BaseStrategy):
                 continue  # Instant next slot
 
             elif status in (401, 403):
-                # This branch is now only reached if _request() somehow returns 403 without
-                # raising (e.g. if future code changes remove the raise). Keep it as a safety net.
-                # Return a SlotLockResult instead of raising so asyncio.gather doesn't swallow
-                # it as a generic Exception — the auth_failure category will surface in summaries.
-                elapsed_ms = (time.time() - start_time) * 1000
-                self.logger.error(
-                    "api.claim_slot.auth_failure",
+                # Since genuine auth failures raise AuthError in _request(),
+                # a returned 401/403 status is a specific slot permission/tier restriction.
+                # Log and continue to the next slot instead of aborting the campaign.
+                self.logger.warning(
+                    "api.claim_slot.permission_denied",
                     campaign_id=campaign_id,
                     attempt=attempts,
                     slot_id=slot_id,
+                    status=status,
+                    body=resp_text[:300],
                 )
-                return SlotLockResult(
+                last_result = SlotLockResult(
                     success=False,
                     campaign_id=campaign_id,
                     campaign_title=campaign_title,
-                    message="auth_failure: session expired during slot claim — update ARCADIA_SESSION_COOKIE",
+                    message=f"permission_denied: slot_id={slot_id} (HTTP {status})",
                     strategy_used=self.name,
                     response_time_ms=elapsed_ms,
-                    definitive=True,
+                    definitive=False,
                 )
+                continue
 
             else:
                 # Unexpected error on this slot — stop the whole sequence
