@@ -84,8 +84,7 @@ class Campaign(BaseModel):
         Uses campaign.reservation.reservedEligibleForMe (the API's own eligibility
         signal) rather than any hardcoded slot-number heuristic.  All field access
         is via .get() with safe defaults so the bot degrades gracefully if the real
-        schema differs from expectations — this is intentional until Phase 2 hardens
-        the model with observed field names.
+        schema differs from expectations.
         """
         # Determine whether this user qualifies for gold-reserved slots.
         # `reservedEligibleForMe` is set server-side per authenticated user.
@@ -96,8 +95,31 @@ class Campaign(BaseModel):
 
         eligible = []
         for slot in self.scheduledSlots:
-            # --- Availability check (defensive: try multiple candidate field names) ---
-            # We don't know yet whether the real field is "status", "state", etc.
+            # --- Availability check ---
+            # Exclude if taken is explicitly True (observed key from real API response)
+            if slot.get("taken") is True:
+                continue
+
+            # Exclude if it's already mine (observed key)
+            if slot.get("isMine") is True:
+                continue
+
+            # --- Blocked check ---
+            # Exclude if explicitly blocked for the current user (observed key)
+            if slot.get("blockedForMe") is True:
+                continue
+
+            # --- Tier / reservation check ---
+            is_reserved_slot = (
+                slot.get("reservedForGold") is True   # observed key
+                or slot.get("reserved")
+                or slot.get("tier") == "gold"
+                or slot.get("reservedTier") is not None
+            )
+            if is_reserved_slot and not user_eligible_for_reserved:
+                continue
+
+            # Legacy fallback checks for backward compatibility / defensive coding
             claimed_by = (
                 slot.get("userId")
                 or slot.get("claimedBy")
@@ -105,15 +127,6 @@ class Campaign(BaseModel):
             )
             slot_status = slot.get("status") or slot.get("state") or "available"
             if claimed_by or slot_status in ("locked", "claimed", "taken"):
-                continue
-
-            # --- Tier / reservation check (API signal, not slot-number heuristic) ---
-            is_reserved_slot = (
-                slot.get("reserved")
-                or slot.get("tier") == "gold"
-                or slot.get("reservedTier") is not None  # another possible field name
-            )
-            if is_reserved_slot and not user_eligible_for_reserved:
                 continue
 
             eligible.append(slot)

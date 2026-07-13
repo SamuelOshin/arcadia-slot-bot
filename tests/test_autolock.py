@@ -144,6 +144,61 @@ class TestIsLockable:
 
 
 # ===========================================================================
+# 1.5. Campaign.eligible_slots filtering
+# ===========================================================================
+
+class TestEligibleSlots:
+    def test_eligible_slots_filters_taken(self):
+        c = _make_campaign()
+        c.scheduledSlots = [
+            {"_id": "slot1", "slotNumber": 1, "taken": False},
+            {"_id": "slot2", "slotNumber": 2, "taken": True},
+        ]
+        eligible = c.eligible_slots()
+        assert len(eligible) == 1
+        assert eligible[0]["_id"] == "slot1"
+
+    def test_eligible_slots_filters_is_mine(self):
+        c = _make_campaign()
+        c.scheduledSlots = [
+            {"_id": "slot1", "slotNumber": 1, "isMine": False},
+            {"_id": "slot2", "slotNumber": 2, "isMine": True},
+        ]
+        eligible = c.eligible_slots()
+        assert len(eligible) == 1
+        assert eligible[0]["_id"] == "slot1"
+
+    def test_eligible_slots_filters_blocked_for_me(self):
+        c = _make_campaign()
+        c.scheduledSlots = [
+            {"_id": "slot1", "slotNumber": 1, "blockedForMe": False},
+            {"_id": "slot2", "slotNumber": 2, "blockedForMe": True},
+        ]
+        eligible = c.eligible_slots()
+        assert len(eligible) == 1
+        assert eligible[0]["_id"] == "slot1"
+
+    def test_eligible_slots_filters_reserved_for_gold_if_not_eligible(self):
+        c = _make_campaign(reservation={"reservedEligibleForMe": False})
+        c.scheduledSlots = [
+            {"_id": "slot1", "slotNumber": 1, "reservedForGold": False},
+            {"_id": "slot2", "slotNumber": 2, "reservedForGold": True},
+        ]
+        eligible = c.eligible_slots()
+        assert len(eligible) == 1
+        assert eligible[0]["_id"] == "slot1"
+
+    def test_eligible_slots_allows_reserved_for_gold_if_eligible(self):
+        c = _make_campaign(reservation={"reservedEligibleForMe": True})
+        c.scheduledSlots = [
+            {"_id": "slot1", "slotNumber": 1, "reservedForGold": False},
+            {"_id": "slot2", "slotNumber": 2, "reservedForGold": True},
+        ]
+        eligible = c.eligible_slots()
+        assert len(eligible) == 2
+
+
+# ===========================================================================
 # 2. ArcadiaClient._filter_campaigns
 # ===========================================================================
 
@@ -356,6 +411,66 @@ class TestApiListCampaignsFailures:
         with pytest.raises(RuntimeError, match="status 500"):
             await strategy.list_campaigns()
         strategy._request.assert_called_once()
+
+
+# ===========================================================================
+# 4.5. Claim Slot Sequential Lock logic in APIStrategy
+# ===========================================================================
+
+class TestClaimSlotLocking:
+    def _make_strategy(self):
+        from app.strategies.api_strategy import APIStrategy
+        session = _make_session()
+        strategy = APIStrategy.__new__(APIStrategy)
+        strategy.session = session
+        strategy.base_url = "https://arcadia-roster.up.railway.app/api"
+        strategy.logger = MagicMock()
+        strategy.logger.warning = MagicMock()
+        strategy._request = AsyncMock()
+        strategy.name = "api"
+        strategy.MAX_SLOT_ATTEMPTS = 10
+        strategy.MAX_LOCK_BUDGET_MS = 5000.0
+        return strategy
+
+    @pytest.mark.asyncio
+    async def test_try_lock_slots_propagates_autherror(self):
+        """AuthError raised inside _request must propagate to halt the loop."""
+        from app.strategies.api_strategy import AuthError
+        strategy = self._make_strategy()
+        # Mock _request to raise AuthError on the first slot attempt
+        strategy._request.side_effect = AuthError("Session expired")
+
+        eligible = [
+            {"_id": "slot1", "slotNumber": 1},
+            {"_id": "slot2", "slotNumber": 2},
+        ]
+        import time
+        with pytest.raises(AuthError):
+            await strategy._try_lock_slots("campaign-abc", "Title", eligible, time.time())
+
+    @pytest.mark.asyncio
+    async def test_try_lock_slots_continues_on_permission_403(self):
+        """403 status (non-auth tier restriction) should be logged as warning and loop continues."""
+        strategy = self._make_strategy()
+        # First slot returns 403 (e.g. gold-reserved block)
+        # Second slot returns 200 (claimed successfully)
+        strategy._request.side_effect = [
+            (403, {"error": "Gold reserved"}, "Gold reserved", {}),
+            (200, {"title": "Title", "slotNumber": 2}, "Success", {}),
+        ]
+
+        eligible = [
+            {"_id": "slot1", "slotNumber": 1},
+            {"_id": "slot2", "slotNumber": 2},
+        ]
+        import time
+        result = await strategy._try_lock_slots("campaign-abc", "Title", eligible, time.time())
+
+        # It should try both slots
+        assert strategy._request.call_count == 2
+        # It should succeed on the second slot
+        assert result.success is True
+        assert result.slot_number == 2
 
 
 # ===========================================================================
