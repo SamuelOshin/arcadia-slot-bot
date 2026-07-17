@@ -73,9 +73,11 @@ def structlog_memory_buffer_processor(logger_inst, name: str, event_dict: dict) 
 class TelegramBotService:
     """Service to run and manage the interactive Telegram Bot."""
     
-    def __init__(self, monitor: CampaignMonitor, scheduler: BotScheduler):
-        self.monitor = monitor
-        self.scheduler = scheduler
+    def __init__(self, monitors: List[CampaignMonitor], schedulers: List[BotScheduler]):
+        self.monitors = monitors
+        self.monitor = monitors[0] if monitors else None
+        self.schedulers = schedulers
+        self.scheduler = schedulers[0] if schedulers else None
         self.app: Optional[Application] = None
         self.pairing_code: Optional[str] = None
         self.logger = logger.bind(component="telegram_bot")
@@ -218,62 +220,48 @@ class TelegramBotService:
         await self.send_main_menu(update)
 
     async def show_status(self, update: Update) -> None:
-        """Helper to generate and output status message."""
-        scheduler_health = "🟢 Active" if self.scheduler._running else "🔴 Paused"
-
-        # Perform a real live session check by pinging the campaigns endpoint.
-        # The old `is_valid` only checked if the cookie string was non-empty in memory
-        # (never expired, never pinged the server), so it always showed ✅ Valid even
-        # when every API call was returning 403.
-        try:
-            api = self.monitor.client.router._get_strategy("api")
-            live_status, _, _, _ = await api._request(
-                "GET",
-                f"{api.base_url}/clip/campaigns",
-                timeout=__import__("aiohttp").ClientTimeout(total=5.0),
-            )
-            if live_status == 200:
-                session_valid = "✅ Live (200 OK)"
-            else:
-                session_valid = f"❌ Dead (HTTP {live_status})"
-        except Exception as e:
-            session_valid = f"⚠️ Check failed ({type(e).__name__})"
-
-        last_check_str = "Never"
-        if self.monitor._last_check:
-            seconds_ago = int((datetime.utcnow() - self.monitor._last_check).total_seconds())
-            last_check_str = f"{seconds_ago}s ago"
-
-        stats = self.monitor.client.get_stats()
+        """Helper to generate summary status message with interactive account navigation."""
+        scheduler_health = "🟢 Active" if any(s._running for s in self.schedulers) else "🔴 Paused"
         
+        # Build summary lines for all accounts
+        account_summaries = []
+        keyboard_buttons = []
+        
+        for idx, monitor in enumerate(self.monitors):
+            label = monitor.account_label
+            # Session check
+            session_status = "🟢 Valid" if monitor.session.is_valid else "🔴 Invalid"
+            stats = monitor.client.get_stats()
+            locked = stats.get('slots_locked_today', 0)
+            limit = stats.get('daily_limit', 3)
+            
+            account_summaries.append(
+                f"👤 <b>{label}</b>: {session_status} | Locked: <code>{locked}/{limit}</code>"
+            )
+            keyboard_buttons.append(
+                InlineKeyboardButton(f"👤 {label}", callback_data=f"status_acct_{idx}")
+            )
+
         message = f"""
-📊 <b>Arcadia Bot Status</b>
+📊 <b>Arcadia Bot Status Summary</b>
 
 🤖 <b>Scheduler:</b> {scheduler_health}
-🔐 <b>Session Auth:</b> {session_valid}
-⏰ <b>Last Check:</b> {last_check_str}
+⏰ <b>Check Interval:</b> <code>{self.scheduler.current_interval}s</code>
 
-⚙️ <b>Current Config:</b>
-• Poll Interval: <code>{settings.poll_interval_seconds}s</code> (Current: <code>{self.scheduler.current_interval}s</code>)
-• Min Payout: <code>${settings.campaign_filter_min_payout}</code>
-• Auto-Lock: <code>{'ENABLED' if settings.auto_lock_enabled else 'DISABLED'}</code>
-
-📈 <b>Stats Today:</b>
-• Slots Locked: <code>{stats.get('slots_locked_today', 0)}/{stats.get('daily_limit', 3)}</code>
-• Remaining Quota: <code>{stats.get('quota_remaining', 0)}</code>
-• Total Monitored: <code>{len(self.monitor._known_campaigns)}</code>
+⚙️ <b>Active Accounts:</b>
+{chr(10).join(account_summaries)}
 """.strip()
+
+        # Keyboard structure
+        keyboard = []
+        # Account selection row
+        keyboard.append(keyboard_buttons)
+        # Global options
+        keyboard.append([
+            InlineKeyboardButton("⚡ Force Check All", callback_data="force_check_all"),
+            InlineKeyboardButton("⏸️ Toggle Scheduler", callback_data="toggle_scheduler")
+        ])
         
-        keyboard = [
-            [
-                InlineKeyboardButton("🔄 Refresh Session", callback_data="session_refresh"),
-                InlineKeyboardButton("⚡ Force Check", callback_data="force_check"),
-            ],
-            [
-                InlineKeyboardButton("⏸️ Pause Scheduler" if self.scheduler._running else "▶️ Resume Scheduler", 
-                                     callback_data="toggle_scheduler")
-            ]
-        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(message, parse_mode="HTML", reply_markup=reply_markup)
 
@@ -717,14 +705,43 @@ To edit these values or update your credentials, use the following commands:
             
         data = query.data
         
-        if data == "session_refresh":
-            await query.message.reply_text("🔄 Attempting to refresh session...")
+        if data.startswith("status_acct_"):
+            idx = int(data.split("_")[-1])
+            monitor = self.monitors[idx]
+            await self._render_account_detail(query, monitor, idx)
+            
+        elif data == "status_summary":
+            await self._render_status_summary(query)
+            
+        elif data.startswith("refresh_acct_"):
+            idx = int(data.split("_")[-1])
+            monitor = self.monitors[idx]
+            msg_handle = await query.message.reply_text(f"🔄 Attempting to refresh session for <b>{monitor.account_label}</b>...", parse_mode="HTML")
+            success = await monitor.session.refresh()
+            if success:
+                await msg_handle.edit_text(f"✅ Session refreshed successfully using KOL token for <b>{monitor.account_label}</b>.", parse_mode="HTML")
+            else:
+                await msg_handle.edit_text(f"❌ Session refresh failed for <b>{monitor.account_label}</b>. Verify the KOL token in configuration.", parse_mode="HTML")
+            await self._render_account_detail(query, monitor, idx)
+
+        elif data == "session_refresh":
+            await query.message.reply_text("🔄 Attempting to refresh session for default account...")
             success = await self.monitor.session.refresh()
             if success:
                 await query.message.reply_text("✅ Session refreshed successfully using KOL token.")
             else:
                 await query.message.reply_text("❌ Session refresh failed. Paste a new cookie with `/set_cookie`.")
                 
+        elif data == "force_check_all":
+            msg_handle = await query.message.reply_text("🔄 Running campaign check on all accounts...")
+            for monitor in self.monitors:
+                try:
+                    next_interval = await monitor.check_and_lock()
+                    await query.message.reply_text(f"✅ Check complete for {monitor.account_label}. Next in {next_interval}s.")
+                except Exception as e:
+                    await query.message.reply_text(f"❌ Check failed for {monitor.account_label}: {str(e)}")
+            await msg_handle.edit_text("✅ Campaign checks complete on all accounts.")
+
         elif data == "force_check":
             await query.message.reply_text("🔄 Running campaign check...")
             try:
@@ -734,12 +751,20 @@ To edit these values or update your credentials, use the following commands:
                 await query.message.reply_text(f"❌ Check failed: {str(e)}")
                 
         elif data == "toggle_scheduler":
-            if self.scheduler._running:
-                self.scheduler.stop()
-                await query.message.reply_text("⏸️ Scheduler paused.")
+            all_running = any(s._running for s in self.schedulers)
+            if all_running:
+                for s in self.schedulers:
+                    s.stop()
+                await query.message.reply_text("⏸️ Schedulers paused.")
             else:
-                self.scheduler.start()
-                await query.message.reply_text("▶️ Scheduler resumed.")
+                for s in self.schedulers:
+                    s.start()
+                await query.message.reply_text("▶️ Schedulers resumed.")
+            # Go back/refresh the status view if possible
+            try:
+                await self._render_status_summary(query)
+            except Exception:
+                pass
                 
         elif data == "toggle_autolock":
             settings.auto_lock_enabled = not settings.auto_lock_enabled
@@ -760,3 +785,81 @@ To edit these values or update your credentials, use the following commands:
                 )
             except Exception as e:
                 await query.message.reply_text(f"❌ Exception during lock attempt: {str(e)}")
+
+    async def _render_account_detail(self, query, monitor: CampaignMonitor, idx: int) -> None:
+        try:
+            api = monitor.client.router._get_strategy("api")
+            live_status, _, _, _ = await api._request(
+                "GET",
+                f"{api.base_url}/clip/campaigns",
+                timeout=__import__("aiohttp").ClientTimeout(total=5.0),
+            )
+            session_valid = "✅ Live (200 OK)" if live_status == 200 else f"❌ Dead (HTTP {live_status})"
+        except Exception as e:
+            session_valid = f"⚠️ Check failed ({type(e).__name__})"
+
+        last_check_str = "Never"
+        if monitor._last_check:
+            seconds_ago = int((datetime.utcnow() - monitor._last_check).total_seconds())
+            last_check_str = f"{seconds_ago}s ago"
+
+        stats = monitor.client.get_stats()
+        
+        message = f"""
+👤 <b>Account Details: {monitor.account_label}</b>
+
+🔐 <b>Session Auth:</b> {session_valid}
+⏰ <b>Last Check:</b> {last_check_str}
+
+📈 <b>Stats Today:</b>
+• Slots Locked: <code>{stats.get('slots_locked_today', 0)}/{stats.get('daily_limit', 3)}</code>
+• Remaining Quota: <code>{stats.get('quota_remaining', 0)}</code>
+• Total Monitored: <code>{len(monitor._known_campaigns)}</code>
+""".strip()
+
+        keyboard = [
+            [
+                InlineKeyboardButton("🔄 Refresh Session", callback_data=f"refresh_acct_{idx}"),
+                InlineKeyboardButton("🔙 Back to Summary", callback_data="status_summary")
+            ]
+        ]
+        await query.edit_message_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    async def _render_status_summary(self, query) -> None:
+        scheduler_health = "🟢 Active" if any(s._running for s in self.schedulers) else "🔴 Paused"
+        
+        account_summaries = []
+        keyboard_buttons = []
+        
+        for idx, monitor in enumerate(self.monitors):
+            label = monitor.account_label
+            session_status = "🟢 Valid" if monitor.session.is_valid else "🔴 Invalid"
+            stats = monitor.client.get_stats()
+            locked = stats.get('slots_locked_today', 0)
+            limit = stats.get('daily_limit', 3)
+            
+            account_summaries.append(
+                f"👤 <b>{label}</b>: {session_status} | Locked: <code>{locked}/{limit}</code>"
+            )
+            keyboard_buttons.append(
+                InlineKeyboardButton(f"👤 {label}", callback_data=f"status_acct_{idx}")
+            )
+
+        message = f"""
+📊 <b>Arcadia Bot Status Summary</b>
+
+🤖 <b>Scheduler:</b> {scheduler_health}
+⏰ <b>Check Interval:</b> <code>{self.scheduler.current_interval}s</code>
+
+⚙️ <b>Active Accounts:</b>
+{chr(10).join(account_summaries)}
+""".strip()
+
+        keyboard = []
+        keyboard.append(keyboard_buttons)
+        keyboard.append([
+            InlineKeyboardButton("⚡ Force Check All", callback_data="force_check_all"),
+            InlineKeyboardButton("⏸️ Toggle Scheduler", callback_data="toggle_scheduler")
+        ])
+        
+        await query.edit_message_text(message, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
