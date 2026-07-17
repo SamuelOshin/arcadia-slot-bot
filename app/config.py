@@ -1,7 +1,20 @@
 """Application configuration with Pydantic Settings."""
 from typing import List, Optional, Any
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, BaseModel
+
+
+class AccountConfig(BaseModel):
+    """Credentials and label for a single Arcadia account."""
+    name: str
+    session_cookie: Optional[str] = None
+    api_token: Optional[str] = None
+    csrf_token: Optional[str] = None
+    storage_state_path: str = "./data/auth_{name}.json"
+
+    @property
+    def resolved_storage_path(self) -> str:
+        return self.storage_state_path.replace("{name}", self.name.lower())
 
 
 class BotConfig(BaseSettings):
@@ -18,6 +31,7 @@ class BotConfig(BaseSettings):
     arcadia_csrf_token: Optional[str] = Field(default=None, alias="ARCADIA_CSRF_TOKEN")
     arcadia_session_cookie: Optional[str] = Field(default=None, alias="ARCADIA_SESSION_COOKIE")
     arcadia_storage_state_path: str = Field(default="./data/auth.json", alias="ARCADIA_STORAGE_STATE_PATH")
+    accounts_json: Optional[str] = Field(default=None, alias="ACCOUNTS")
 
     # ── X OAuth ───────────────────────────────────────────
     x_client_id: Optional[str] = Field(default=None, alias="X_CLIENT_ID")
@@ -91,6 +105,32 @@ class BotConfig(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def accounts(self) -> List[AccountConfig]:
+        """
+        Parse the ACCOUNTS env var.
+        
+        Format: JSON array of objects.
+        Example:
+            ACCOUNTS=[
+              {"name": "Samuel", "session_cookie": "...", "api_token": "..."},
+              {"name": "John",   "session_cookie": "...", "api_token": "..."}
+            ]
+        """
+        if self.accounts_json:
+            import json
+            raw = json.loads(self.accounts_json)
+            return [AccountConfig(**item) for item in raw]
+        
+        # Backwards-compatible fallback
+        return [AccountConfig(
+            name="default",
+            session_cookie=self.arcadia_session_cookie,
+            api_token=self.arcadia_api_token,
+            csrf_token=self.arcadia_csrf_token,
+            storage_state_path=self.arcadia_storage_state_path,
+        )]
 
 
 # Singleton config instance

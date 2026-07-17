@@ -43,3 +43,7 @@ async def get_strategy_router(
 async def get_campaign_monitor(request: Request):
     from app.services.campaign_monitor import CampaignMonitor
     return request.app.state.monitor
+
+
+async def get_all_monitors(request: Request):
+    return request.app.state.monitors

@@ -18,16 +18,63 @@ logger = structlog.get_logger()
 class SessionManager:
     """Handles Arcadia session lifecycle: creation, refresh, validation."""
 
-    def __init__(self):
+    def __init__(self, account: Optional["AccountConfig"] = None):
+        """
+        Args:
+            account: If provided, use credentials from this AccountConfig.
+                     If None (default), read from global settings (backwards-compatible).
+        """
+        from app.config import AccountConfig
+
         self._token: Optional[str] = None
         self._csrf: Optional[str] = None
         self._cookie: Optional[str] = None
         self._expires_at: Optional[datetime] = None
-        self._storage_state_path = settings.arcadia_storage_state_path
+        self._account_name: str = "default"
+
+        if account is not None:
+            self._token = account.api_token
+            self._csrf = account.csrf_token
+            self._cookie = account.session_cookie
+            self._storage_state_path = account.resolved_storage_path
+            self._account_name = account.name
+            self._account_config = account
+        else:
+            self._storage_state_path = settings.arcadia_storage_state_path
+            self._account_config = None
+
         self._load_session()
 
     def _load_session(self) -> None:
         """Load existing session from env or storage file."""
+        if self._account_config is not None:
+            # Multi-account mode: only load storage state file if it exists, otherwise keep initial config
+            if os.path.exists(self._storage_state_path):
+                try:
+                    with open(self._storage_state_path, "r") as f:
+                        state = json.load(f)
+
+                    cookies = state.get("cookies", [])
+                    cookie_pairs = []
+                    for cookie in cookies:
+                        cookie_pairs.append(f"{cookie['name']}={cookie['value']}")
+
+                    if cookie_pairs:
+                        self._cookie = "; ".join(cookie_pairs)
+
+                    origins = state.get("origins", [])
+                    for origin in origins:
+                        if "arcadia-roster" in origin.get("origin", ""):
+                            local_storage = origin.get("localStorage", [])
+                            for item in local_storage:
+                                if item.get("name") == "auth_token":
+                                    self._token = item["value"]
+
+                    logger.info("session.loaded_from_storage", account=self._account_name, path=self._storage_state_path)
+                except Exception as e:
+                    logger.warning("session.load_failed", account=self._account_name, error=str(e))
+            return
+
         # 1. Determine if env cookie has changed since last boot (manual override check)
         env_cookie = settings.arcadia_session_cookie
         last_env_path = os.path.join(os.path.dirname(self._storage_state_path), "last_env_cookie.txt")
@@ -200,10 +247,11 @@ class SessionManager:
 
         Returns True if refresh succeeded, False if manual re-auth needed.
         """
-        logger.info("session.refresh_attempt")
+        logger.info("session.refresh_attempt", account=self._account_name)
 
-        if not settings.arcadia_api_token:
-            logger.warning("session.refresh_failed_no_token")
+        token = self._account_config.api_token if self._account_config else settings.arcadia_api_token
+        if not token:
+            logger.warning("session.refresh_failed_no_token", account=self._account_name)
             return False
 
         try:
@@ -221,14 +269,14 @@ class SessionManager:
                 data = resp.json()
                 csrf_token = data.get("csrfToken")
                 if not csrf_token:
-                    logger.error("session.refresh_failed_no_csrf")
+                    logger.error("session.refresh_failed_no_csrf", account=self._account_name)
                     return False
                 
                 # 2. POST to callback with token
                 callback_url = f"{settings.arcadia_base_url}/api/auth/callback/kol-token"
                 payload = {
                     "csrfToken": csrf_token,
-                    "token": settings.arcadia_api_token,
+                    "token": token,
                     "json": "true"
                 }
                 
@@ -285,6 +333,9 @@ class SessionManager:
 
     def _update_env_file(self, new_cookie_str: str) -> None:
         """Update the ARCADIA_SESSION_COOKIE value in the .env file."""
+        if self._account_config is not None:
+            # Multi-account mode: do not update .env file, rely on storage state path
+            return
         env_path = ".env"
         if not os.path.exists(env_path):
             return
