@@ -381,6 +381,19 @@ class ArcadiaClient:
             "failed": total_attempted - cycle_succeeded,
             "failures": cycle_failures,
             "avg_response_ms": round(avg_response, 1),
+            "attempts": [
+                {
+                    "campaign_title": campaigns_to_attempt[idx].title,
+                    "campaign_id": r.campaign_id,
+                    "payout": campaigns_to_attempt[idx].payout_amount,
+                    "payout_unit": campaigns_to_attempt[idx].payout_unit,
+                    "success": r.success,
+                    "slot_number": r.slot_number,
+                    "message": r.message,
+                    "response_time_ms": r.response_time_ms,
+                }
+                for idx, r in enumerate(processed_results)
+            ]
         }
 
         self.logger.info("client.auto_lock_cycle_complete", **self._last_cycle_summary)

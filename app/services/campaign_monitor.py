@@ -70,39 +70,68 @@ class CampaignMonitor:
         if not settings.telegram_bot_token or not settings.telegram_chat_id:
             return
 
-        attempted = summary.get("attempted", 0)
         succeeded = summary.get("succeeded", 0)
-        failed = summary.get("failed", 0)
-        avg_ms = summary.get("avg_response_ms", 0)
-        failures = summary.get("failures", {})
         total_raw = summary.get("total_raw", 0)
         total_filtered = summary.get("total_filtered", 0)
+        attempts = summary.get("attempts", [])
+
+        succeeded_attempts = [a for a in attempts if a.get("success")]
+        failed_attempts = [a for a in attempts if not a.get("success")]
+
+        lines = []
+
+        if succeeded > 0:
+            lines.append("⚡ <b>Auto-Lock Successful!</b> 🎉")
+            lines.append("──────────────────")
+            for attempt in succeeded_attempts:
+                lines.append(f"🎯 <b>{attempt.get('campaign_title')}</b>")
+                lines.append(f"💰 <b>Payout:</b> ${attempt.get('payout')}/{attempt.get('payout_unit')}")
+                lines.append(f"⏱️ <b>Speed:</b> {attempt.get('response_time_ms', 0):.0f}ms")
+                if attempt.get("slot_number"):
+                    lines.append(f"🪑 <b>Slot Claimed:</b> #{attempt.get('slot_number')}")
+                lines.append("──────────────────")
+            
+            if failed_attempts:
+                lines.append("⚠️ <b>Lock Misses:</b>")
+                for attempt in failed_attempts:
+                    msg = attempt.get("message", "unknown error")
+                    if msg == "taken" or "conflict" in msg.lower() or "taken" in msg.lower():
+                        reason = "taken (collision)"
+                    else:
+                        reason = msg
+                    lines.append(f"• <b>{attempt.get('campaign_title')}</b>: {reason} ({attempt.get('response_time_ms', 0):.0f}ms)")
+                lines.append("──────────────────")
+        else:
+            # Succeeded == 0, meaning all attempts failed
+            lines.append("⚠️ <b>Auto-Lock Missed</b>")
+            lines.append("──────────────────")
+            for attempt in failed_attempts:
+                lines.append(f"🎯 <b>{attempt.get('campaign_title')}</b>")
+                lines.append(f"💰 <b>Payout:</b> ${attempt.get('payout')}/{attempt.get('payout_unit')}")
+                lines.append(f"⏱️ <b>Speed:</b> {attempt.get('response_time_ms', 0):.0f}ms")
+                
+                msg = attempt.get("message", "unknown error")
+                if msg == "taken" or "conflict" in msg.lower() or "taken" in msg.lower():
+                    reason = "taken (collision)"
+                else:
+                    reason = msg
+                lines.append(f"❌ <b>Reason:</b> {reason}")
+                lines.append("──────────────────")
+
+        # Cycle statistics footer
+        lines.append("📈 <b>Cycle Stats:</b>")
+        lines.append(f"• Checked: {total_raw} campaigns ({total_filtered} filtered)")
+        
+        # Build filter details for context
         rejections = summary.get("filter_rejections", {})
-
-        # Build failure detail string
-        failure_parts = []
-        for cat, count in sorted(failures.items()):
-            label = {"taken": "taken", "bad_request": "bad_req", "rate_limited": "rate_limit",
-                     "quota": "quota", "exception": "error", "other": "other"}.get(cat, cat)
-            failure_parts.append(f"{count} {label}")
-        failure_str = ", ".join(failure_parts) if failure_parts else "none"
-
-        # Build filter detail (only show non-zero)
         filter_parts = []
         for reason, count in sorted(rejections.items(), key=lambda x: -x[1]):
             filter_parts.append(f"{count} {reason}")
-        filter_str = ", ".join(filter_parts[:3])  # top 3
+        filter_str = ", ".join(filter_parts[:3])
         if len(filter_parts) > 3:
             filter_str += f" +{len(filter_parts)-3} more"
-
-        lines = [
-            f"🔁 <b>Auto-Lock Cycle</b>",
-            f"• {total_raw} checked, {total_filtered} filtered",
-        ]
-        if filter_parts:
+        if filter_str:
             lines.append(f"  └ {filter_str}")
-        lines.append(f"• {attempted} attempted → {succeeded} ✅, {failed} ❌ ({failure_str})")
-        lines.append(f"• Avg response: {avg_ms}ms")
 
         message = "\n".join(lines)
         await self.notifier._send_telegram(
