@@ -429,32 +429,86 @@ To edit these values or update your credentials, use the following commands:
             return
 
         if not context.args:
-            await update.message.reply_text("⚠️ Please provide the cookie string. Example: `/set_cookie key=val; ...`")
+            await update.message.reply_text(
+                "⚠️ Please provide the cookie string.\n"
+                "To set for a specific account: `/set_cookie <account_name> <cookie_string>`\n"
+                "Example: `/set_cookie Michael1 key=val; ...`"
+            )
             return
 
-        cookie_val = " ".join(context.args)
+        target_account = context.args[0]
+        matching_monitor = None
+        args_cookie = context.args
+
+        for m in self.monitors:
+            normalized_target = target_account.lower().replace(" ", "").replace("_", "").replace("-", "")
+            normalized_label = m.account_label.lower().replace(" ", "").replace("_", "").replace("-", "")
+            if normalized_target == normalized_label:
+                matching_monitor = m
+                args_cookie = context.args[1:]
+                break
+
+        if matching_monitor is None:
+            matching_monitor = self.monitors[0]
+            args_cookie = context.args
+
+        if not args_cookie:
+            await update.message.reply_text("⚠️ Please provide the cookie string after the account name.")
+            return
+
+        cookie_val = " ".join(args_cookie)
         if "=" not in cookie_val:
             cookie_val = f"__Secure-next-auth.session-token={cookie_val}"
 
+        account_name = matching_monitor.account_label
+
         try:
-            self.update_env_var("ARCADIA_SESSION_COOKIE", cookie_val)
-            settings.arcadia_session_cookie = cookie_val
-            self.monitor.session._cookie = cookie_val
-            self.monitor.session._load_session()
+            # 1. Update memory cookie in session manager
+            matching_monitor.session._cookie = cookie_val
             
-            await update.message.reply_text("✅ <b>Session cookie updated!</b> Connection test in progress...", parse_mode="HTML")
+            # 2. Build and save storage state file so it persists across bot restarts
+            import time
+            import json
+            cookie_parts = cookie_val.split("; ")
+            cookies_list = []
+            for part in cookie_parts:
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    cookies_list.append({
+                        "name": k.strip(),
+                        "value": v.strip(),
+                        "domain": "arcadia-roster.up.railway.app",
+                        "path": "/",
+                        "expires": time.time() + 30 * 86400,
+                        "httpOnly": True if "token" in k.lower() or "csrf" in k.lower() else False,
+                        "secure": True,
+                        "sameSite": "Lax"
+                    })
+            storage_state = {
+                "cookies": cookies_list,
+                "origins": []
+            }
+            matching_monitor.session.save_storage_state(storage_state)
+            matching_monitor.session._load_session()
             
-            strategy = self.monitor.client.router._get_strategy("api")
+            # If it is the default/fallback config, also sync settings
+            if matching_monitor.account_label == "default" or len(self.monitors) == 1:
+                settings.arcadia_session_cookie = cookie_val
+                self.update_env_var("ARCADIA_SESSION_COOKIE", cookie_val)
+
+            await update.message.reply_text(f"✅ <b>Session cookie updated for {account_name}!</b> Connection test in progress...", parse_mode="HTML")
+            
+            strategy = matching_monitor.client.router._get_strategy("api")
             try:
                 campaigns = await strategy.list_campaigns()
                 if campaigns is not None:
-                    await update.message.reply_text(f"🎉 <b>Success!</b> Fetched {len(campaigns)} campaigns successfully.", parse_mode="HTML")
+                    await update.message.reply_text(f"🎉 <b>Success!</b> {account_name} fetched {len(campaigns)} campaigns successfully.", parse_mode="HTML")
                 else:
-                    await update.message.reply_text("⚠️ Cookie updated, but API returned empty/invalid list.", parse_mode="HTML")
+                    await update.message.reply_text(f"⚠️ Cookie updated for {account_name}, but API returned empty/invalid list.", parse_mode="HTML")
             except Exception as e:
-                await update.message.reply_text(f"❌ API Connection test failed: {str(e)}")
+                await update.message.reply_text(f"❌ API Connection test failed for {account_name}: {str(e)}")
         except Exception as e:
-            await update.message.reply_text(f"❌ Failed to update cookie: {str(e)}")
+            await update.message.reply_text(f"❌ Failed to update cookie for {account_name}: {str(e)}")
 
     async def handle_set_min_payout(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self.is_authorized(update):
