@@ -55,18 +55,23 @@ async def lifespan(app: FastAPI):
     logger.info("app.startup", version="1.0.0", env=settings.environment)
 
     # Initialize and start background scheduler
-    monitor = CampaignMonitor()
-    
-    # Try to verify and auto-login if token is available and session is missing/invalid
-    if not monitor.session.is_valid or not monitor.session.get_session_token():
-        logger.info("app.startup_session_invalid_or_missing_attempting_refresh")
-        await monitor.session.refresh()
+    monitors = []
+    for account in settings.accounts:
+        logger.info("app.startup_account", name=account.name)
+        monitor = CampaignMonitor(account=account)
+        
+        # Try to verify and auto-login if token is available and session is missing/invalid
+        if not monitor.session.is_valid or not monitor.session.get_session_token():
+            logger.info("app.startup_session_invalid_or_missing_attempting_refresh", account=account.name)
+            await monitor.session.refresh()
+        monitors.append(monitor)
 
-    scheduler = BotScheduler(monitor)
+    scheduler = BotScheduler(monitors)
     scheduler.start()
 
     app.state.scheduler = scheduler
-    app.state.monitor = monitor
+    app.state.monitors = monitors
+    app.state.monitor = monitors[0] if monitors else None
 
     # Initialize and start Telegram bot
     tg_bot = None
@@ -74,7 +79,7 @@ async def lifespan(app: FastAPI):
         try:
             logger.info("app.startup_telegram_bot")
             from app.services.telegram_bot import TelegramBotService
-            tg_bot = TelegramBotService(monitor, scheduler)
+            tg_bot = TelegramBotService(monitors, [scheduler])
             await tg_bot.start()
             app.state.tg_bot = tg_bot
         except Exception as tg_err:
