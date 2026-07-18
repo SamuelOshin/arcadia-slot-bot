@@ -25,8 +25,11 @@ class CampaignMonitor:
         self,
         client: Optional[ArcadiaClient] = None,
         notifier: Optional[Notifier] = None,
+        account = None,  # Optional[AccountConfig]
     ):
-        self.session = SessionManager()
+        self.account = account
+        self.account_label: str = account.name if account else "default"
+        self.session = SessionManager(account=account)
         self.circuit_breaker = CircuitBreaker()
         self.notifier = notifier or Notifier()
 
@@ -40,8 +43,15 @@ class CampaignMonitor:
         self._last_check: Optional[datetime] = None
         self._last_campaign_states: dict[str, dict] = {}
         self._is_warmed_up: bool = False   # True after first silent poll
-        self._known_path: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "known_campaigns.json")
-        self.logger = logger.bind(component="campaign_monitor")
+        
+        # Per-account known campaigns database
+        safe_name = self.account_label.lower().replace(" ", "_")
+        self._known_path: str = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
+            "data", 
+            f"known_campaigns_{safe_name}.json"
+        )
+        self.logger = logger.bind(component="campaign_monitor", account=self.account_label)
         self._load_known_campaigns()
 
     def _load_known_campaigns(self) -> None:
@@ -80,8 +90,10 @@ class CampaignMonitor:
 
         lines = []
 
+        label_suffix = f" [{self.account_label}]" if self.account_label != "default" else ""
+
         if succeeded > 0:
-            lines.append("⚡ <b>Auto-Lock Successful!</b> 🎉")
+            lines.append(f"⚡ <b>Auto-Lock Successful!{label_suffix}</b> 🎉")
             lines.append("──────────────────")
             for attempt in succeeded_attempts:
                 lines.append(f"🎯 <b>{attempt.get('campaign_title')}</b>")
@@ -103,7 +115,7 @@ class CampaignMonitor:
                 lines.append("──────────────────")
         else:
             # Succeeded == 0, meaning all attempts failed
-            lines.append("⚠️ <b>Auto-Lock Missed</b>")
+            lines.append(f"⚠️ <b>Auto-Lock Missed{label_suffix}</b>")
             lines.append("──────────────────")
             for attempt in failed_attempts:
                 lines.append(f"🎯 <b>{attempt.get('campaign_title')}</b>")

@@ -790,6 +790,56 @@ class TestCampaignMonitor:
 
 
 # ===========================================================================
+# Multi-Account tests
+# ===========================================================================
+
+class TestMultiAccount:
+    """Tests multi-account parsing and isolation."""
+
+    def test_config_parse_multi_accounts(self):
+        """Test config.accounts parses multi-account JSON format correctly."""
+        raw_json = '[{"name": "Samuel", "session_cookie": "cookie_sam", "api_token": "token_sam"}, {"name": "John", "session_cookie": "cookie_john", "api_token": "token_john"}]'
+        with patch.object(settings, "accounts_json", raw_json):
+            accts = settings.accounts
+            assert len(accts) == 2
+            assert accts[0].name == "Samuel"
+            assert accts[0].session_cookie == "cookie_sam"
+            assert accts[0].api_token == "token_sam"
+            assert accts[0].resolved_storage_path == "./data/auth_samuel.json"
+            assert accts[1].name == "John"
+            assert accts[1].session_cookie == "cookie_john"
+            assert accts[1].api_token == "token_john"
+            assert accts[1].resolved_storage_path == "./data/auth_john.json"
+
+    def test_config_fallback_single_account(self):
+        """Test fallback config when ACCOUNTS env var is not set."""
+        with patch.object(settings, "accounts_json", None):
+            with patch.object(settings, "arcadia_session_cookie", "default_cookie"):
+                with patch.object(settings, "arcadia_api_token", "default_token"):
+                    accts = settings.accounts
+                    assert len(accts) == 1
+                    assert accts[0].name == "default"
+                    assert accts[0].session_cookie == "default_cookie"
+                    assert accts[0].api_token == "default_token"
+
+    def test_session_manager_initialization_multi_account(self):
+        """Test SessionManager init with explicit AccountConfig."""
+        from app.config import AccountConfig
+        from app.core.session_manager import SessionManager
+
+        acct = AccountConfig(
+            name="TestAcct",
+            session_cookie="test_cookie",
+            api_token="test_token"
+        )
+        sm = SessionManager(account=acct)
+        assert sm._token == "test_token"
+        assert sm._cookie == "test_cookie"
+        assert sm._account_name == "TestAcct"
+        assert sm._storage_state_path == "./data/auth_testacct.json"
+
+
+# ===========================================================================
 # Runner (also works with: uv run pytest tests/test_autolock.py -v)
 # ===========================================================================
 
