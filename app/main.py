@@ -142,21 +142,40 @@ app.add_middleware(
 # Include all API routes
 app.include_router(api_router, prefix="/api/v1")
 
+# Mount Static Frontend SPA if built
+import os
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, RedirectResponse
 
-@app.get("/")
-async def root():
-    """Root endpoint with basic info."""
-    return {
-        "name": "Arcadia Slot Bot",
-        "version": "1.0.0",
-        "status": "running",
-        "docs": "/docs",
-        "health": "/api/v1/health",
-    }
+frontend_dist = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
+if not os.path.exists(frontend_dist):
+    frontend_dist = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dist")
+
+if os.path.exists(frontend_dist):
+    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="static_assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        if full_path.startswith("api/") or full_path in ("docs", "redoc", "openapi.json"):
+            return RedirectResponse(url="/docs")
+        file_path = os.path.join(frontend_dist, full_path)
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
+else:
+    @app.get("/")
+    async def root():
+        """Root endpoint with basic info when frontend build is not mounted."""
+        return {
+            "name": "Arcadia Slot Bot",
+            "version": "1.0.0",
+            "status": "running",
+            "docs": "/docs",
+            "health": "/api/v1/health",
+        }
 
 
 @app.get("/docs-redirect")
 async def docs_redirect():
     """Redirect to Swagger UI."""
-    from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/docs")
