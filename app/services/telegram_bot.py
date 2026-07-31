@@ -60,7 +60,20 @@ def structlog_memory_buffer_processor(logger_inst, name: str, event_dict: dict) 
         
         log_line = f"[{timestamp}] {level}: {event}{extras_str}"
         log_buffer.append(log_line)
-        
+
+        # Broadcast event to real-time SSE listeners
+        try:
+            from app.api.events import broadcast_event
+            broadcast_event("log", {
+                "timestamp": timestamp,
+                "level": level,
+                "event": event,
+                "line": log_line,
+                "extras": extras
+            })
+        except Exception:
+            pass
+
         # Map event to message for Railway log viewer visibility
         if "message" not in event_dict:
             event_dict["message"] = event
