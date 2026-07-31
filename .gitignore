@@ -6,6 +6,10 @@ dist/
 wheels/
 *.egg-info
 
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+
 # Virtual environments
 .venv
 

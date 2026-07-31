@@ -88,6 +88,16 @@ class BotScheduler:
         self._running = False
         logger.info("scheduler.stopped")
 
+    def pause(self) -> None:
+        """Pause all scheduler jobs."""
+        self.scheduler.pause()
+        logger.info("scheduler.paused")
+
+    def resume(self) -> None:
+        """Resume all scheduler jobs."""
+        self.scheduler.resume()
+        logger.info("scheduler.resumed")
+
     def _make_poll_job(self, monitor: CampaignMonitor):
         async def _poll_campaigns() -> None:
             try:
