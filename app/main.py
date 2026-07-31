@@ -56,10 +56,19 @@ async def lifespan(app: FastAPI):
 
     # Initialize and start background scheduler
     monitors = []
-    for account in settings.accounts:
-        logger.info("app.startup_account", name=account.name)
-        monitor = CampaignMonitor(account=account)
-        
+    # Single coordinator shared across all monitors:
+    # prevents multiple accounts burning daily quota on the same single-slot campaign.
+    from app.services.campaign_monitor import LockCoordinator
+    coordinator = LockCoordinator()
+
+    for i, account in enumerate(settings.accounts):
+        logger.info("app.startup_account", name=account.name, account_index=i)
+        monitor = CampaignMonitor(
+            account=account,
+            coordinator=coordinator,
+            account_index=i,
+        )
+
         # Try to verify and auto-login if token is available and session is missing/invalid
         if not monitor.session.is_valid or not monitor.session.get_session_token():
             logger.info("app.startup_session_invalid_or_missing_attempting_refresh", account=account.name)

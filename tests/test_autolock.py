@@ -531,8 +531,8 @@ class TestAutoLockRouting:
              patch.object(settings, "auto_lock_max_concurrent", 2):
             results = await client.auto_lock_available(campaigns=[campaign])
 
-        # claim path called; fast_lock NOT called
-        mock_api.lock_slot_for_claim_campaign.assert_called_once_with(campaign)
+        # claim path called with account_index=0 (default); fast_lock NOT called
+        mock_api.lock_slot_for_claim_campaign.assert_called_once_with(campaign, account_index=0)
         client.fast_lock_campaign.assert_not_called()
         assert results[0].success is True
 
@@ -668,7 +668,7 @@ class TestLockCampaignRouting:
         client.router.lock_slot = AsyncMock()
 
         result = await client.lock_campaign(campaign.id)
-        mock_api.lock_slot_for_claim_campaign.assert_called_once_with(campaign)
+        mock_api.lock_slot_for_claim_campaign.assert_called_once_with(campaign, account_index=0)
         client.router.lock_slot.assert_not_called()
         assert result.success is True
 

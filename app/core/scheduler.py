@@ -3,7 +3,7 @@
 Runs as a separate process or integrated with FastAPI lifespan.
 """
 import asyncio
-from datetime import datetime
+import datetime as dt
 from typing import List
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -12,6 +12,14 @@ from app.config import settings
 from app.services.campaign_monitor import CampaignMonitor
 
 logger = structlog.get_logger()
+
+# Hard cap (seconds) on a single poll cycle.
+# Prevents a slow Playwright fallback from blocking the next tick.
+_POLL_TIMEOUT_SECONDS = 8.0
+
+# Startup jitter increment per account (seconds).
+# Spreads accounts evenly across the poll window so coverage is near-continuous.
+_JITTER_STEP_SECONDS = 0.4
 
 
 class BotScheduler:
@@ -22,6 +30,11 @@ class BotScheduler:
         self.monitor = monitors[0] if monitors else None
         self.scheduler = AsyncIOScheduler()
         self._running = False
+        # Per-monitor interval tracking — avoids one account overwriting another's state.
+        self.current_intervals: dict[str, int] = {
+            m.account_label: settings.poll_interval_seconds for m in monitors
+        }
+        # Keep legacy single-value for backwards compat with external callers
         self.current_interval = settings.poll_interval_seconds
 
     def start(self) -> None:
@@ -30,14 +43,20 @@ class BotScheduler:
             return
 
         # Main campaign polling job per monitor
-        for monitor in self.monitors:
+        # Each account is staggered by _JITTER_STEP_SECONDS so they never poll in lockstep.
+        # max_instances=2 allows one "late" in-flight cycle to coexist with the next tick
+        # instead of silently dropping it (the root cause of missed campaign drops).
+        for i, monitor in enumerate(self.monitors):
             safe_label = monitor.account_label.lower().replace(" ", "_")
+            interval = self.current_intervals[monitor.account_label]
+            jitter = i * _JITTER_STEP_SECONDS
+            start_date = dt.datetime.now() + dt.timedelta(seconds=jitter)
             self.scheduler.add_job(
                 self._make_poll_job(monitor),
-                trigger=IntervalTrigger(seconds=self.current_interval),
+                trigger=IntervalTrigger(seconds=interval, start_date=start_date),
                 id=f"poll_campaigns_{safe_label}",
                 replace_existing=True,
-                max_instances=1,
+                max_instances=2,
             )
 
         # Connection warmup job run every 60s
@@ -73,16 +92,37 @@ class BotScheduler:
         async def _poll_campaigns() -> None:
             try:
                 logger.debug("scheduler.poll_start", account=monitor.account_label)
-                next_interval = await monitor.check_and_lock()
-                
+                # Hard timeout: if a poll cycle hangs (e.g. Playwright fallback slow),
+                # cancel it rather than blocking the next scheduled tick.
+                next_interval = await asyncio.wait_for(
+                    monitor.check_and_lock(),
+                    timeout=_POLL_TIMEOUT_SECONDS,
+                )
+
                 safe_label = monitor.account_label.lower().replace(" ", "_")
-                if self._running and next_interval != self.current_interval:
-                    logger.info("scheduler.reschedule", account=monitor.account_label, old_interval=self.current_interval, new_interval=next_interval)
+                prev_interval = self.current_intervals.get(monitor.account_label, self.current_interval)
+                if self._running and next_interval != prev_interval:
+                    logger.info(
+                        "scheduler.reschedule",
+                        account=monitor.account_label,
+                        old_interval=prev_interval,
+                        new_interval=next_interval,
+                    )
                     self.scheduler.reschedule_job(
                         f"poll_campaigns_{safe_label}",
-                        trigger=IntervalTrigger(seconds=next_interval)
+                        trigger=IntervalTrigger(seconds=next_interval),
                     )
-                    self.current_interval = next_interval
+                    self.current_intervals[monitor.account_label] = next_interval
+                    # Keep legacy single-value in sync with the first monitor
+                    if monitor == self.monitors[0]:
+                        self.current_interval = next_interval
+
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "scheduler.poll_timeout",
+                    account=monitor.account_label,
+                    timeout=_POLL_TIMEOUT_SECONDS,
+                )
             except Exception as e:
                 logger.error("scheduler.poll_failed", account=monitor.account_label, error=str(e))
         return _poll_campaigns
