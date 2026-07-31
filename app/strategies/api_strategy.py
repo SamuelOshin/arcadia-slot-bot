@@ -15,6 +15,20 @@ from app.strategies.base import BaseStrategy
 
 logger = structlog.get_logger()
 
+# ---------------------------------------------------------------------------
+# Module-level short-lived cache for campaign detail (scheduledSlots).
+# Shared across all APIStrategy instances (one per account) so that when the
+# broadcast coordinator triggers Account 2 & 3 immediately after Account 1
+# fetched the detail, they get the slot list in 0ms instead of another 150-400ms
+# GET round-trip.
+#
+# TTL is intentionally short (2s) because scheduledSlots change in real-time
+# as other bots grab them. A stale cache for >2s risks sending lock requests
+# for slots that no longer exist, which wastes time on guaranteed 409s.
+# ---------------------------------------------------------------------------
+_campaign_detail_cache: dict[str, tuple[float, Any]] = {}
+_CACHE_TTL_SECONDS = 2.0
+
 
 class APIStrategy(BaseStrategy):
     """Direct HTTP API strategy for Arcadia.
@@ -27,11 +41,16 @@ class APIStrategy(BaseStrategy):
 
     def __init__(self, session_manager):
         super().__init__(session_manager)
+        # Increased limits for multi-account burst locking:
+        # 3 accounts x 2 concurrent POSTs each = 6 simultaneous connections needed.
+        # ttl_dns_cache avoids repeated DNS resolution on every request burst.
         connector = aiohttp.TCPConnector(
             family=socket.AF_INET,
-            limit=10,
-            limit_per_host=5,
+            limit=50,
+            limit_per_host=20,
             keepalive_timeout=30.0,
+            ttl_dns_cache=300,
+            enable_cleanup_closed=True,
         )
         self.client = aiohttp.ClientSession(
             connector=connector,
@@ -54,9 +73,12 @@ class APIStrategy(BaseStrategy):
         if "cookies" not in kwargs:
             kwargs["cookies"] = self.session.cookie_jar
 
-        # Apply connection timeout budget of 5s total unless overridden
+        # Lock requests get a tighter budget: a slow lock is a lost slot.
         if "timeout" not in kwargs:
-            kwargs["timeout"] = aiohttp.ClientTimeout(total=5.0, connect=3.0)
+            if method == "POST":
+                kwargs["timeout"] = aiohttp.ClientTimeout(total=4.0, connect=1.5)
+            else:
+                kwargs["timeout"] = aiohttp.ClientTimeout(total=5.0, connect=3.0)
 
         for attempt in range(max_retries + 1):
             try:
@@ -171,7 +193,35 @@ class APIStrategy(BaseStrategy):
         For claim_slot campaigns the API returns scheduledSlots at the ROOT of the
         response (not nested inside the 'campaign' object).  This method merges those
         slots into the Campaign model so callers don't need to know the response shape.
+
+        Results are cached for _CACHE_TTL_SECONDS to avoid redundant GET round-trips
+        when multiple accounts race to lock the same campaign simultaneously.
         """
+        # --- Cache check ---
+        now = time.time()
+        cached = _campaign_detail_cache.get(campaign_id)
+        if cached:
+            cached_at, cached_campaign = cached
+            if now - cached_at < _CACHE_TTL_SECONDS:
+                self.logger.debug("api.get_campaign_cache_hit", campaign_id=campaign_id,
+                                  age_ms=round((now - cached_at) * 1000, 1))
+                return cached_campaign
+
+        # --- Cache miss: fetch from network ---
+        campaign = await self._fetch_campaign(campaign_id)
+
+        # Populate cache (only on success, so a 404 doesn't cache a None)
+        if campaign is not None:
+            # Prune entries older than 10s to prevent unbounded memory growth
+            stale_keys = [k for k, (ts, _) in _campaign_detail_cache.items() if now - ts > 10.0]
+            for k in stale_keys:
+                del _campaign_detail_cache[k]
+            _campaign_detail_cache[campaign_id] = (now, campaign)
+
+        return campaign
+
+    async def _fetch_campaign(self, campaign_id: str) -> Optional[Campaign]:
+        """Raw network fetch for campaign detail — called only on cache miss."""
         url = f"{self.base_url}/clip/campaigns/{campaign_id}"
         try:
             status, data, _, _ = await self._request("GET", url)
@@ -204,6 +254,7 @@ class APIStrategy(BaseStrategy):
             self.logger.error("api.get_campaign_failed", campaign_id=campaign_id, error=str(e))
 
         return None
+
 
     async def lock_slot(self, campaign_id: str) -> SlotLockResult:
         """Lock a slot via API POST.
@@ -421,14 +472,18 @@ class APIStrategy(BaseStrategy):
                 response_time_ms=elapsed_ms,
             )
 
-    async def lock_slot_for_claim_campaign(self, campaign: Campaign) -> SlotLockResult:
+    async def lock_slot_for_claim_campaign(
+        self,
+        campaign: Campaign,
+        account_index: int = 0,
+    ) -> SlotLockResult:
         """Handle slot locking for ugcSlotMode == 'claim_slot' campaigns.
 
-        Fetches a fresh slot list, filters for eligible slots using the API's own
-        reservation eligibility signal, then tries slots sequentially until one
-        succeeds, the attempt ceiling is hit, or the time budget runs out.
+        Fetches a fresh slot list (or uses the shared cache), filters for eligible
+        slots, then rotates the slot list by account_index so that each account
+        targets a different slot first — eliminating inter-account 409 collisions.
 
-        IMPORTANT: All 409 collisions are handled HERE and never propagate to the
+        All 409 collisions are handled HERE and never propagate to the
         StrategyRouter or CircuitBreaker — they are expected business-domain events,
         not infrastructure failures.
         """
@@ -454,6 +509,7 @@ class APIStrategy(BaseStrategy):
             campaign_id=campaign_id,
             total_slots=len(fresh.scheduledSlots),
             eligible_slots=len(eligible),
+            account_index=account_index,
         )
 
         if not eligible:
@@ -465,6 +521,21 @@ class APIStrategy(BaseStrategy):
                 strategy_used=self.name,
                 response_time_ms=(time.time() - start_time) * 1000,
                 definitive=True,
+            )
+
+        # Rotate slot list by account_index so each account targets a different slot
+        # first — Account 0 → slot[0], Account 1 → slot[2], Account 2 → slot[4].
+        # This eliminates the burst of inter-account 409s that occur when all accounts
+        # race to grab slot #1 simultaneously.
+        if account_index > 0 and len(eligible) > 1:
+            offset = (account_index * 2) % len(eligible)
+            eligible = eligible[offset:] + eligible[:offset]
+            self.logger.debug(
+                "api.claim_slot.staggered",
+                campaign_id=campaign_id,
+                account_index=account_index,
+                offset=offset,
+                first_slot_id=eligible[0].get("_id") or eligible[0].get("id"),
             )
 
         # Attempt sequential locking across eligible slots

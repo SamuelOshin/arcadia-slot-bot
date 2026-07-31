@@ -20,8 +20,9 @@ logger = structlog.get_logger()
 class ArcadiaClient:
     """High-level client with business rules."""
 
-    def __init__(self, strategy_router: StrategyRouter):
+    def __init__(self, strategy_router: StrategyRouter, account_index: int = 0):
         self.router = strategy_router
+        self.account_index = account_index  # Used for slot staggering in claim_slot campaigns
         self._slots_locked_today = 0
         self._last_reset = date.today()
         self._locked_campaigns: set = set()
@@ -186,7 +187,7 @@ class ArcadiaClient:
                 campaign_id=campaign_id,
                 slots=len(campaign.scheduledSlots),
             )
-            result = await api_strategy.lock_slot_for_claim_campaign(campaign)
+            result = await api_strategy.lock_slot_for_claim_campaign(campaign, account_index=self.account_index)
         else:
             # Standard path: open_submit and all other campaign types.
             result = await self.router.lock_slot(campaign_id, preferred_strategy=strategy)
@@ -307,7 +308,9 @@ class ArcadiaClient:
             if c.needs_claim:
                 self.logger.info("client.auto_lock.claim_slot_path",
                     campaign_id=c.id, title=c.title)
-                tasks.append(api_strategy.lock_slot_for_claim_campaign(c))
+                # Pass account_index so each account targets a different slot first,
+                # eliminating inter-account 409 collisions (slot staggering).
+                tasks.append(api_strategy.lock_slot_for_claim_campaign(c, account_index=self.account_index))
             else:
                 tasks.append(self.fast_lock_campaign(c.id))
 

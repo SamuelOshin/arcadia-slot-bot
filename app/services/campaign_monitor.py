@@ -4,7 +4,8 @@ Polls for new campaigns, detects drops, and triggers locks.
 """
 import json
 import os
-from typing import Set, Optional
+import asyncio
+from typing import Set, Optional, List
 from datetime import datetime
 import structlog
 from app.config import settings
@@ -18,6 +19,39 @@ from app.core.circuit_breaker import CircuitBreaker
 logger = structlog.get_logger()
 
 
+class LockCoordinator:
+    """Prevents multiple accounts from redundantly targeting the same campaign.
+
+    When a campaign has only 1 slot, sending 3 concurrent lock attempts from
+    3 accounts wastes 2 daily quotas. The coordinator ensures only ONE account
+    per campaign wins the right to attempt a lock. Others skip gracefully.
+    """
+
+    def __init__(self):
+        self._claimed: dict[str, str] = {}  # campaign_id → account_label
+        self._lock = asyncio.Lock()
+
+    async def try_claim(self, campaign_id: str, account_label: str) -> bool:
+        """Return True if this account should proceed with locking.
+
+        The first caller wins. Subsequent callers for the same campaign_id
+        return False and should skip without logging an error.
+        """
+        async with self._lock:
+            if campaign_id in self._claimed:
+                return False
+            self._claimed[campaign_id] = account_label
+            return True
+
+    def release(self, campaign_id: str) -> None:
+        """Release a campaign claim so it can be re-attempted if the lock fails."""
+        self._claimed.pop(campaign_id, None)
+
+    def release_all(self) -> None:
+        """Release all claims (call on each new poll cycle)."""
+        self._claimed.clear()
+
+
 class CampaignMonitor:
     """Monitors Arcadia for campaign drops and available slots."""
 
@@ -26,9 +60,13 @@ class CampaignMonitor:
         client: Optional[ArcadiaClient] = None,
         notifier: Optional[Notifier] = None,
         account = None,  # Optional[AccountConfig]
+        coordinator: Optional[LockCoordinator] = None,
+        account_index: int = 0,
     ):
         self.account = account
         self.account_label: str = account.name if account else "default"
+        self.account_index: int = account_index
+        self.coordinator = coordinator
         self.session = SessionManager(account=account)
         self.circuit_breaker = CircuitBreaker()
         self.notifier = notifier or Notifier()
@@ -37,7 +75,7 @@ class CampaignMonitor:
             self.client = client
         else:
             router = StrategyRouter(self.session, self.notifier, self.circuit_breaker)
-            self.client = ArcadiaClient(router)
+            self.client = ArcadiaClient(router, account_index=self.account_index)
 
         self._known_campaigns: Set[str] = set()
         self._last_check: Optional[datetime] = None
