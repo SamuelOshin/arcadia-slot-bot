@@ -148,10 +148,12 @@ class Campaign(BaseModel):
             if now > self.ends_at:
                 return False
         if self.reservation and not self.reservation.get("reservedEligibleForMe", False):
-            # Check if general slots are available
-            general_locked = self.reservation.get("generalLocked", 0)
-            general_capacity = self.reservation.get("generalCapacity", 0)
-            if general_locked >= general_capacity:
+            # Only block if the campaign has a hard general-slot cap AND it's exhausted.
+            # IMPORTANT: generalCapacity=0 means "no cap" in the Arcadia API (not "zero capacity").
+            # Blocking on 0 >= 0 was a false negative that silently dropped lockable campaigns.
+            general_locked = self.reservation.get("generalLocked", 0) or 0
+            general_capacity = self.reservation.get("generalCapacity", 0) or 0
+            if general_capacity > 0 and general_locked >= general_capacity:
                 return False
         return True
 
