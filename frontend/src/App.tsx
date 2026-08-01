@@ -3,18 +3,21 @@ import { Header } from './components/Header';
 import { AccountCard } from './components/AccountCard';
 import { LogConsole } from './components/LogConsole';
 import { CampaignsBoard } from './components/CampaignsBoard';
+import { LockedLedger } from './components/LockedLedger';
 import { ConfigModal } from './components/ConfigModal';
-import type { AccountInfo, BotStats, Campaign, LogTrace } from './types';
-import { LayoutDashboard, Flame, Terminal } from 'lucide-react';
+import type { AccountInfo, BotStats, Campaign, LogTrace, LockedRecord } from './types';
+import { LayoutDashboard, Flame, Terminal, Lock } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [stats, setStats] = useState<BotStats | null>(null);
   const [accounts, setAccounts] = useState<AccountInfo[]>([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [lockedRecords, setLockedRecords] = useState<LockedRecord[]>([]);
   const [logs, setLogs] = useState<LogTrace[]>([]);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isLoadingCampaigns, setIsLoadingCampaigns] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<'console' | 'campaigns' | 'logs'>('console');
+  const [isLoadingLedger, setIsLoadingLedger] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<'console' | 'campaigns' | 'ledger' | 'logs'>('console');
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
 
   // Fetch Stats & Accounts
@@ -48,10 +51,29 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  // Fetch Locked Slot History Ledger
+  const fetchLockedLedger = useCallback(async () => {
+    setIsLoadingLedger(true);
+    try {
+      const res = await fetch('/api/v1/slots/locked');
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.records) {
+          setLockedRecords(data.records);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch lock ledger:', err);
+    } finally {
+      setIsLoadingLedger(false);
+    }
+  }, []);
+
   // Initialize SSE Live Stream
   useEffect(() => {
     fetchDashboardData();
     fetchCampaigns();
+    fetchLockedLedger();
 
     const eventSource = new EventSource('/api/v1/events/stream');
 
@@ -100,16 +122,17 @@ export const App: React.FC = () => {
       }
     });
 
-    // Polling fallback interval for stats
+    // Polling fallback interval for stats & ledger
     const pollTimer = setInterval(() => {
       fetchDashboardData();
+      fetchLockedLedger();
     }, 4000);
 
     return () => {
       eventSource.close();
       clearInterval(pollTimer);
     };
-  }, [fetchDashboardData, fetchCampaigns]);
+  }, [fetchDashboardData, fetchCampaigns, fetchLockedLedger]);
 
   // Toggle Bot Pause / Resume
   const handleTogglePause = async () => {
@@ -144,6 +167,7 @@ export const App: React.FC = () => {
       const data = await res.json();
       fetchDashboardData();
       fetchCampaigns();
+      fetchLockedLedger();
       if (res.ok && data.success) {
         return { success: true, message: data.message || 'Slot claimed successfully!' };
       }
@@ -164,6 +188,7 @@ export const App: React.FC = () => {
         onRefresh={() => {
           fetchDashboardData();
           fetchCampaigns();
+          fetchLockedLedger();
         }}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
@@ -196,6 +221,18 @@ export const App: React.FC = () => {
           >
             <Flame className="w-4 h-4" />
             <span>Campaign Drops ({campaigns.length})</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('ledger')}
+            className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-mono font-medium transition-all ${
+              activeTab === 'ledger'
+                ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 shadow-[0_0_15px_rgba(6,182,212,0.15)]'
+                : 'text-slate-400 hover:text-white hover:bg-slate-900'
+            }`}
+          >
+            <Lock className="w-4 h-4" />
+            <span>Locked Ledger ({lockedRecords.length})</span>
           </button>
 
           <button
@@ -260,7 +297,16 @@ export const App: React.FC = () => {
           />
         )}
 
-        {/* Tab Content 3: Full Terminal Log View */}
+        {/* Tab Content 3: Locked Slots & Attempt Ledger */}
+        {activeTab === 'ledger' && (
+          <LockedLedger
+            records={lockedRecords}
+            isLoading={isLoadingLedger}
+            onRefresh={fetchLockedLedger}
+          />
+        )}
+
+        {/* Tab Content 4: Full Terminal Log View */}
         {activeTab === 'logs' && (
           <div>
             <LogConsole logs={logs} onClear={() => setLogs([])} />
