@@ -1,11 +1,10 @@
 import React, { useState } from 'react';
 import { 
   UserCheck, 
-  RotateCw, 
-  Key, 
+  RotateCw,
   Layers,
-  ChevronDown,
-  ChevronUp
+  ChevronUp,
+  ChevronDown
 } from 'lucide-react';
 import type { AccountInfo } from '../types';
 
@@ -27,7 +26,8 @@ export const AccountCard: React.FC<AccountCardProps> = ({ account, onRefreshSess
     }
   };
 
-  const quotaPercent = Math.min(
+  const isUnlimited = !account.max_slots_per_day || account.max_slots_per_day <= 0;
+  const quotaPercent = isUnlimited ? 100 : Math.min(
     100,
     Math.round((account.daily_count / Math.max(1, account.max_slots_per_day)) * 100)
   );
@@ -58,20 +58,10 @@ export const AccountCard: React.FC<AccountCardProps> = ({ account, onRefreshSess
             </h3>
             <div className="flex items-center space-x-2 mt-0.5">
               <span className={`inline-flex items-center space-x-1 text-[11px] font-mono px-2 py-0.5 rounded-md ${
-                account.is_valid 
-                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' 
-                  : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                account.is_valid ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
               }`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${account.is_valid ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
-                <span>{account.is_valid ? 'Session Active' : 'Session Invalid'}</span>
+                {account.is_valid ? 'Valid Session' : 'Invalid Cookie'}
               </span>
-
-              {account.has_token && (
-                <span className="text-[10px] font-mono text-cyan-400 flex items-center space-x-1" title="Auth Token Available">
-                  <Key className="w-3 h-3" />
-                  <span>Token</span>
-                </span>
-              )}
             </div>
           </div>
         </div>
@@ -90,9 +80,9 @@ export const AccountCard: React.FC<AccountCardProps> = ({ account, onRefreshSess
       {/* Quota Progress Bar */}
       <div className="mb-4 bg-slate-950/60 rounded-xl p-3 border border-slate-900">
         <div className="flex justify-between items-center text-xs font-mono mb-1.5">
-          <span className="text-slate-400">Daily Slot Quota</span>
+          <span className="text-slate-400">Slots Claimed Today</span>
           <span className="text-white font-semibold">
-            {account.daily_count} / {account.max_slots_per_day}
+            {account.daily_count} / {isUnlimited ? '∞ Unlimited' : account.max_slots_per_day}
           </span>
         </div>
         <div className="w-full h-2 bg-slate-900 rounded-full overflow-hidden">

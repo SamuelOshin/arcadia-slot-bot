@@ -31,14 +31,18 @@ class ArcadiaClient:
         self.logger = logger.bind(component="arcadia_client")
 
     def _check_quota(self) -> bool:
-        """Check if we've hit the daily slot limit."""
+        """Check if we've hit the daily slot limit (0 or negative means unlimited)."""
         # Reset counter if day changed
         if date.today() != self._last_reset:
             self._slots_locked_today = 0
             self._last_reset = date.today()
             self._locked_campaigns.clear()
 
-        return self._slots_locked_today < settings.campaign_filter_max_slots_per_day
+        max_slots = settings.campaign_filter_max_slots_per_day
+        if max_slots <= 0:
+            return True  # 0 or negative = unlimited slots
+
+        return self._slots_locked_today < max_slots
 
     def _log_filter_skip(self, c: Campaign, reason: str, **extra) -> None:
         """Log filter rejection at DEBUG or WARNING depending on verbose mode."""
