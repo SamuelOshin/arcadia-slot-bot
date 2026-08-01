@@ -1,42 +1,56 @@
 # ═══════════════════════════════════════════════════════════
-# Arcadia Slot Bot — Production Dockerfile
+# Arcadia Slot Bot — Multi-Stage Production Dockerfile
 # ═══════════════════════════════════════════════════════════
 
-FROM python:3.12-slim AS base
+# -----------------------------------------------------------
+# Stage 1: Build Frontend React SPA (Node.js Build Environment)
+# -----------------------------------------------------------
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app/frontend
 
-# Install uv
+COPY frontend/package*.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+# -----------------------------------------------------------
+# Stage 2: Final Production Application Runner (Python Environment)
+# -----------------------------------------------------------
+FROM python:3.12-slim AS runner
+
+# Install uv package manager
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Install system deps for Playwright and Node.js for Frontend
+# Install system dependencies for Playwright Chromium
 RUN apt-get update && apt-get install -y \
     curl wget gnupg libglib2.0-0 libnss3 libnspr4 \
     libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
     libdbus-1-3 libxkbcommon0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
     libcairo2 libasound2 libatspi2.0-0 \
-    nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python deps
+# Install Python dependencies
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project
 
-# Place executable scripts in PATH
+# Add virtualenv to PATH
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Install Playwright browsers
+# Install Playwright browser dependencies
 RUN playwright install chromium
 RUN playwright install-deps chromium
 
-# Copy app code
+# Copy Python backend application code
 COPY . .
 
-# Build Frontend SPA
-RUN if [ -d "frontend" ]; then cd frontend && npm install && npm run build; fi
+# Copy compiled SPA production assets from Stage 1 into /app/frontend/dist
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# Create data dir for sessions
+# Create persistent session storage directory
 RUN mkdir -p /app/data
 
 EXPOSE 8000 9090
