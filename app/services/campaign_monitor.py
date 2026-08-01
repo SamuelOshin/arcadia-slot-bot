@@ -324,7 +324,18 @@ class CampaignMonitor:
             # Auto-lock if enabled (pass raw campaigns to reuse connection results concurrently)
             if settings.auto_lock_enabled and raw_campaigns:
                 results = await self.client.auto_lock_available(campaigns=raw_campaigns)
+                from app.services.lock_ledger import record_lock_attempt
                 for r in results:
+                    record_lock_attempt(
+                        account_name=self.account_label,
+                        campaign_id=r.campaign_id,
+                        campaign_title=r.campaign_title,
+                        success=r.success,
+                        slot_number=r.slot_number,
+                        strategy=r.strategy_used,
+                        response_time_ms=r.response_time_ms,
+                        message=r.message,
+                    )
                     if r.success:
                         self.logger.info("monitor.auto_locked", campaign=r.campaign_id, title=r.campaign_title)
                     else:
