@@ -84,3 +84,22 @@ async def auto_lock_all(
         "failed": len(failed),
         "results": results,
     }
+
+
+@router.get("/locked")
+async def get_locked_slots_history(
+    account: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    """Retrieve history of all successful and failed slot lock attempts."""
+    from app.services.lock_ledger import get_locked_slots
+    records = get_locked_slots(account_name=account, status=status)
+    return {"records": records, "total": len(records)}
+
+
+@router.delete("/locked")
+async def clear_locked_history():
+    """Clear all locked slot records from ledger history."""
+    from app.services.lock_ledger import clear_locked_slots
+    success = clear_locked_slots()
+    return {"success": success, "message": "Lock history cleared"}

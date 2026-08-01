@@ -56,3 +56,19 @@ export interface LogTrace {
   line: string;
   extras?: Record<string, any>;
 }
+
+export interface LockedRecord {
+  id: string;
+  account_name: string;
+  campaign_id: string;
+  campaign_title: string;
+  slot_number?: number | null;
+  slot_id?: string | null;
+  payout?: string | null;
+  strategy: string;
+  response_time_ms: number;
+  locked_at: string;
+  success: boolean;
+  status: string;
+  reason?: string | null;
+}

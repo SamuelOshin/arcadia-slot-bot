@@ -235,3 +235,20 @@ class CampaignFilter(BaseModel):
     max_slots_per_day: Optional[int] = None
     auto_lock: bool = False
     preferred_types: Optional[List[CampaignType]] = None
+
+
+class LockedSlotRecord(BaseModel):
+    """Record of a successful or failed slot lock attempt."""
+    id: str
+    account_name: str
+    campaign_id: str
+    campaign_title: str
+    slot_number: Optional[int] = None
+    slot_id: Optional[str] = None
+    payout: Optional[str] = None
+    strategy: str = "api"
+    response_time_ms: float = 0.0
+    locked_at: str
+    success: bool = True
+    status: str = "LOCKED"  # LOCKED, SLOT_TAKEN, QUOTA_EXCEEDED, AUTH_ERROR, FAILED
+    reason: Optional[str] = None
