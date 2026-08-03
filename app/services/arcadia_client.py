@@ -281,8 +281,12 @@ class ArcadiaClient:
         scored_campaigns.sort(key=lambda x: x[0], reverse=True)
         sorted_campaigns = [c for _, c in scored_campaigns]
 
-        # Determine how many we can attempt based on remaining quota
-        quota_remaining = max(0, settings.campaign_filter_max_slots_per_day - self._slots_locked_today)
+        # Determine how many we can attempt based on remaining quota (0 or negative means unlimited)
+        if settings.campaign_filter_max_slots_per_day <= 0:
+            quota_remaining = 999999  # Unlimited quota
+        else:
+            quota_remaining = max(0, settings.campaign_filter_max_slots_per_day - self._slots_locked_today)
+
         if quota_remaining <= 0:
             self.logger.info("client.quota_exhausted_on_autolock")
             self._last_cycle_summary = {
