@@ -14,7 +14,7 @@ from app.services.campaign_monitor import CampaignMonitor
 logger = structlog.get_logger()
 
 # Hard cap (seconds) on a single poll cycle.
-# Prevents a slow Playwright fallback from blocking the next tick.
+# Prevents a slow strategy from blocking the next tick.
 _POLL_TIMEOUT_SECONDS = 8.0
 
 # Startup jitter increment per account (seconds).
@@ -59,10 +59,12 @@ class BotScheduler:
                 max_instances=2,
             )
 
-        # Connection warmup job run every 60s
+        # Connection warmup job — runs every 10 minutes.
+        # Keeps the aiohttp TCP connection pool alive without hammering the API.
+        # Previously 60s which generated 4,320 unnecessary GET requests/day.
         self.scheduler.add_job(
             self._warmup,
-            trigger=IntervalTrigger(seconds=60),
+            trigger=IntervalTrigger(minutes=10),
             id="connection_warmup",
             replace_existing=True,
             max_instances=1,
@@ -102,8 +104,8 @@ class BotScheduler:
         async def _poll_campaigns() -> None:
             try:
                 logger.debug("scheduler.poll_start", account=monitor.account_label)
-                # Hard timeout: if a poll cycle hangs (e.g. Playwright fallback slow),
-                # cancel it rather than blocking the next scheduled tick.
+                # Hard timeout: if a poll cycle hangs, cancel it rather
+                # than blocking the next scheduled tick.
                 next_interval = await asyncio.wait_for(
                     monitor.check_and_lock(),
                     timeout=_POLL_TIMEOUT_SECONDS,

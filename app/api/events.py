@@ -13,7 +13,15 @@ _event_subscribers: Set[asyncio.Queue] = set()
 
 
 def broadcast_event(event_type: str, data: dict):
-    """Broadcast an event payload to all connected SSE clients."""
+    """Broadcast an event payload to all connected SSE clients.
+
+    Short-circuits immediately when no clients are connected — skips
+    json.dumps() serialization entirely. This is the hot path: during normal
+    operation there are zero SSE viewers, so this guard eliminates thousands
+    of unnecessary serialization calls per minute.
+    """
+    if not _event_subscribers:
+        return
     payload = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
     to_remove = set()
     for queue in _event_subscribers:

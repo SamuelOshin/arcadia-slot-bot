@@ -222,7 +222,7 @@ class BotHealth(BaseModel):
 class LockRequest(BaseModel):
     """Manual lock request via API."""
     campaign_id: str
-    strategy: Optional[Literal["api", "playwright", "ai_agent"]] = None
+    strategy: Optional[Literal["api", "ai_agent"]] = None
     force: bool = False
 
 

@@ -114,8 +114,19 @@ class TelegramBotService:
             self.logger.info(f"Send '/start {self.pairing_code}' to your bot on Telegram to pair.")
             self.logger.info("=" * 60)
 
-        # Build application
-        self.app = Application.builder().token(token).build()
+        # Build application with explicit timeouts to prevent rapid retry loops
+        # when Railway's network is unstable. The defaults (5s read, no connect
+        # timeout) cause the polling loop to spin fast on disconnection events,
+        # generating hundreds of exception logs per minute.
+        self.app = (
+            Application.builder()
+            .token(token)
+            .read_timeout(15)
+            .write_timeout(15)
+            .connect_timeout(10)
+            .pool_timeout(5)
+            .build()
+        )
 
         # Command handlers
         self.app.add_handler(CommandHandler("start", self.handle_start))
@@ -140,7 +151,10 @@ class TelegramBotService:
         # Start background polling
         await self.app.initialize()
         await self.app.start()
-        await self.app.updater.start_polling()
+        # drop_pending_updates=True discards any messages that arrived while
+        # the service was restarted — prevents a command backlog from triggering
+        # lock attempts or flooding logs on startup.
+        await self.app.updater.start_polling(drop_pending_updates=True)
         self.logger.info("telegram.bot_started")
 
     async def stop(self) -> None:
