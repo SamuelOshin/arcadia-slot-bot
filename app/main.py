@@ -2,7 +2,6 @@
 
 Multi-strategy campaign slot automation with:
 - API-first primary strategy
-- Playwright browser automation fallback
 - AI agent emergency fallback
 - Circuit breaker pattern
 - Real-time notifications
@@ -116,7 +115,6 @@ app = FastAPI(
 
     ## Strategies
     - **API** (Primary): Direct HTTP calls — fastest (~50ms)
-    - **Playwright** (Fallback): Browser automation — reliable (~2-5s)
     - **AI Agent** (Emergency): Vision-language model — resilient (~10-30s)
 
     ## Features

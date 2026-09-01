@@ -316,9 +316,15 @@ class CampaignMonitor:
                     if rejection_reason not in ("already_locked", "already_submitted", "no_slots", "expired", "status_not_active", "unknown"):
                         await self.notifier.notify_campaign_dropped(campaign)
 
-            # Update known set
-            self._known_campaigns = {c.id for c in raw_campaigns}
-            self._save_known_campaigns()
+            # Update known set — only persist to disk when the set changes.
+            # Previously this wrote on every cycle (every 10s × 3 accounts = 18 writes/min)
+            # even when no campaigns changed, causing unnecessary I/O CPU load.
+            new_known = {c.id for c in raw_campaigns}
+            if new_known != self._known_campaigns:
+                self._known_campaigns = new_known
+                self._save_known_campaigns()
+            else:
+                self._known_campaigns = new_known
             self._last_check = datetime.utcnow()
 
             # Auto-lock if enabled (pass raw campaigns to reuse connection results concurrently)
@@ -346,13 +352,16 @@ class CampaignMonitor:
                 if summary and summary.get("attempted", 0) > 0:
                     await self._send_autolock_summary(summary)
 
-            # Determine next dynamic interval trigger
+            # ── Dynamic interval logic ────────────────────────────────────────
+            # Goal: always poll at POLL_INTERVAL_SECONDS (user configured 3s).
+            # Exception: when a slot was *just* released (recently_filled), burst
+            # to 2s for a few cycles to maximise our lock chance at that critical
+            # moment, then snap back.  The old any_full→10s branch is removed —
+            # it silently tripled the poll interval even though slots-full campaigns
+            # are irrelevant to us and there are ALWAYS some on Arcadia.
             if recently_filled:
-                next_interval = 3
-                self.logger.info("monitor.interval_aggressive_release", interval=3)
-            elif any_full:
-                next_interval = 5
-                self.logger.debug("monitor.interval_aggressive_full", interval=5)
+                next_interval = max(2, settings.poll_interval_seconds - 1)
+                self.logger.info("monitor.interval_burst_on_release", interval=next_interval)
             else:
                 next_interval = settings.poll_interval_seconds
 

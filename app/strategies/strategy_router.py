@@ -14,7 +14,6 @@ from app.core.circuit_breaker import CircuitBreaker
 from app.core.notifier import Notifier
 from app.strategies.base import BaseStrategy
 from app.strategies.api_strategy import APIStrategy
-from app.strategies.playwright_strategy import PlaywrightStrategy
 from app.strategies.ai_agent_strategy import AIAgentStrategy
 
 logger = structlog.get_logger()
@@ -31,7 +30,6 @@ class StrategyRouter:
 
     STRATEGY_MAP = {
         "api": APIStrategy,
-        "playwright": PlaywrightStrategy,
         "ai_agent": AIAgentStrategy,
     }
 
@@ -72,7 +70,7 @@ class StrategyRouter:
             try:
                 campaigns = await strategy.list_campaigns()
                 await self.circuit_breaker.record_success(name)
-                self.logger.info("strategy.list_success", strategy=name, count=len(campaigns))
+                self.logger.debug("strategy.list_success", strategy=name, count=len(campaigns))
                 return campaigns
 
             except Exception as e:

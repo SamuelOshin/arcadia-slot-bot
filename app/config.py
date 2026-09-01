@@ -47,7 +47,7 @@ class BotConfig(BaseSettings):
     lock_verbose_logging: bool = Field(default=False, alias="LOCK_VERBOSE_LOGGING")
 
     # ── Strategy Configuration ────────────────────────────
-    strategy_priority: Any = Field(default=["api", "playwright", "ai_agent"], alias="STRATEGY_PRIORITY")
+    strategy_priority: Any = Field(default=["api", "ai_agent"], alias="STRATEGY_PRIORITY")
 
     @field_validator("strategy_priority", mode="before")
     @classmethod
