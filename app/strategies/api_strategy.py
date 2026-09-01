@@ -1,7 +1,7 @@
 """PRIMARY STRATEGY: Direct API calls.
 
 Fastest approach (~50-200ms). Requires reverse-engineered endpoints.
-Falls back to Playwright if API returns 401/403 or unknown endpoints.
+Falls back to AI Agent if API returns persistent auth failures.
 """
 import time
 import socket
@@ -41,13 +41,14 @@ class APIStrategy(BaseStrategy):
 
     def __init__(self, session_manager):
         super().__init__(session_manager)
-        # Increased limits for multi-account burst locking:
-        # 3 accounts x 2 concurrent POSTs each = 6 simultaneous connections needed.
+        # Right-sized pool for 3 accounts × 2 concurrent lock POSTs + 1 list GET:
+        # max ~9 simultaneous connections needed; 15 total gives a safe 60% buffer.
+        # Previously over-provisioned at 50/20 which kept excess sockets in RAM.
         # ttl_dns_cache avoids repeated DNS resolution on every request burst.
         connector = aiohttp.TCPConnector(
             family=socket.AF_INET,
-            limit=50,
-            limit_per_host=20,
+            limit=15,
+            limit_per_host=8,
             keepalive_timeout=30.0,
             ttl_dns_cache=300,
             enable_cleanup_closed=True,
@@ -82,7 +83,11 @@ class APIStrategy(BaseStrategy):
 
         for attempt in range(max_retries + 1):
             try:
-                self.logger.info("api.request_sent", method=method, url=url)
+                # GET polls are debug-only — lock POSTs stay at INFO so they're always visible.
+                if method == "GET":
+                    self.logger.debug("api.request_sent", method=method, url=url)
+                else:
+                    self.logger.info("api.request_sent", method=method, url=url)
                 async with self.client.request(method, url, **kwargs) as response:
                     text_data = await response.text()
                     json_data = None
@@ -91,7 +96,10 @@ class APIStrategy(BaseStrategy):
                             json_data = await response.json()
                         except Exception:
                             pass
-                    self.logger.info("api.request_done", method=method, url=url, status=response.status)
+                    if method == "GET":
+                        self.logger.debug("api.request_done", method=method, url=url, status=response.status)
+                    else:
+                        self.logger.info("api.request_done", method=method, url=url, status=response.status)
                     if response.cookies:
                         self.session.update_cookies_from_response(response.cookies)
                     if response.status in (401, 403):
@@ -155,7 +163,7 @@ class APIStrategy(BaseStrategy):
 
             if status == 200:
                 campaigns = self._parse_campaigns(data)
-                self.logger.info("api.list_success", count=len(campaigns))
+                self.logger.debug("api.list_success", count=len(campaigns))
 
                 # Filter out campaigns where status == "locked"
                 active_campaigns = [c for c in campaigns if c.status != "locked"]

@@ -15,8 +15,6 @@ dependencies = [
     "langchain-openai>=0.2.12",
     "openai>=1.57.0",
     "orjson>=3.10.12",
-    "playwright>=1.49.0",
-    "playwright-stealth==1.0.6",
     "prometheus-client>=0.21.1",
     "pydantic>=2.10.3",
     "pydantic-settings>=2.7.0",

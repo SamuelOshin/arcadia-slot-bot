@@ -129,7 +129,11 @@ class ArcadiaClient:
 
             filtered.append(c)
 
-        self.logger.info("client.filter_result", total=len(campaigns), passed=len(filtered))
+        # Only log at INFO when campaigns actually pass — avoids 300/min noise on quiet cycles.
+        if filtered:
+            self.logger.info("client.filter_result", total=len(campaigns), passed=len(filtered))
+        else:
+            self.logger.debug("client.filter_result", total=len(campaigns), passed=0)
         # Sort by payout desc, then slots remaining asc (race for scarce slots)
         filtered.sort(key=lambda c: (-c.payout_amount, c.slots_remaining if c.slots_remaining is not None else float('inf')))
 
@@ -241,7 +245,7 @@ class ArcadiaClient:
         # Log circuit breaker state before starting
         try:
             cb_state = await self.router.circuit_breaker.get_state("api")
-            self.logger.info("client.auto_lock_circuit_state", api_state=cb_state.value)
+            self.logger.debug("client.auto_lock_circuit_state", api_state=cb_state.value)
         except Exception:
             pass
 
@@ -263,7 +267,8 @@ class ArcadiaClient:
                 "failures": {},
                 "response_times": [],
             }
-            self.logger.info("client.auto_lock_none_available",
+            # DEBUG: nothing to lock this cycle — filter_result already captured the rejection counts.
+            self.logger.debug("client.auto_lock_none_available",
                 total_raw=total_raw, filtered=total_filtered,
                 rejections=dict(self._cycle_filter_rejections))
             return []
