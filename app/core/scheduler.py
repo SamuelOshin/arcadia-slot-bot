@@ -157,12 +157,12 @@ class BotScheduler:
 
     async def _heartbeat(self) -> None:
         """Log heartbeat for monitoring."""
-        logger.info("scheduler.heartbeat", timestamp=datetime.utcnow().isoformat())
+        logger.info("scheduler.heartbeat", timestamp=dt.datetime.now(dt.timezone.utc).isoformat())
 
     def add_one_off_job(self, func, delay_seconds: int) -> None:
         """Schedule a one-off job."""
         from apscheduler.triggers.date import DateTrigger
-        run_date = datetime.utcnow() + __import__("datetime").timedelta(seconds=delay_seconds)
+        run_date = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=delay_seconds)
         self.scheduler.add_job(
             func,
             trigger=DateTrigger(run_date=run_date),
