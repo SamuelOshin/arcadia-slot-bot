@@ -1,0 +1,27 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "copilot/debug-lock-issue-campaigns",
+    "feature/frontend-dashboard",
+    "feature/locked-ledger",
+    "feature/multi-account",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "copilot/debug-lock-issue-campaigns": "main",
+    "feature/frontend-dashboard": "main",
+    "feature/locked-ledger": "main",
+    "feature/multi-account": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "copilot/debug-lock-issue-campaigns",
+    "feature/frontend-dashboard",
+    "feature/locked-ledger",
+    "feature/multi-account",
+    "origin"
+  ]
+}
