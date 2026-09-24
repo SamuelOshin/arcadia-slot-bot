@@ -81,6 +81,7 @@ class CampaignMonitor:
         self._last_check: Optional[datetime] = None
         self._last_campaign_states: dict[str, dict] = {}
         self._is_warmed_up: bool = False   # True after first silent poll
+        self._background_tasks: Set[asyncio.Task] = set()
         
         # Per-account known campaigns database
         safe_name = self.account_label.lower().replace(" ", "_")
@@ -91,6 +92,13 @@ class CampaignMonitor:
         )
         self.logger = logger.bind(component="campaign_monitor", account=self.account_label)
         self._load_known_campaigns()
+
+    def _fire_background_task(self, coro) -> asyncio.Task:
+        """Create a background asyncio task with reference retention to prevent GC."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     def _load_known_campaigns(self) -> None:
         """Load known campaign IDs from disk (survives restarts)."""
@@ -184,11 +192,14 @@ class CampaignMonitor:
             lines.append(f"  └ {filter_str}")
 
         message = "\n".join(lines)
-        await self.notifier._send_telegram(
-            chat_id=settings.telegram_chat_id.split(",")[0].strip(),
-            message=message,
-        )
-        self.logger.info("monitor.autolock_summary_sent", summary=summary)
+        try:
+            await self.notifier._send_telegram(
+                chat_id=settings.telegram_chat_id.split(",")[0].strip(),
+                message=message,
+            )
+            self.logger.info("monitor.autolock_summary_sent", summary=summary)
+        except Exception as e:
+            self.logger.error("monitor.autolock_summary_failed", error=str(e))
 
     async def check_and_lock(self) -> int:
         """Main monitoring loop — check campaigns, act, and return next poll interval."""
@@ -225,6 +236,33 @@ class CampaignMonitor:
                             "timestamp": datetime.utcnow()
                         }
                 return next_interval
+
+            # Auto-lock if enabled — fire immediately upon fetch before state tracking to minimize latency
+            if settings.auto_lock_enabled and raw_campaigns:
+                results = await self.client.auto_lock_available(campaigns=raw_campaigns)
+                from app.services.lock_ledger import record_lock_attempt
+                for r in results:
+                    record_lock_attempt(
+                        account_name=self.account_label,
+                        campaign_id=r.campaign_id,
+                        campaign_title=r.campaign_title,
+                        success=r.success,
+                        slot_number=r.slot_number,
+                        strategy=r.strategy_used,
+                        response_time_ms=r.response_time_ms,
+                        message=r.message,
+                    )
+                    if r.success:
+                        self.logger.info("monitor.auto_locked", campaign=r.campaign_id, title=r.campaign_title)
+                    else:
+                        self.logger.warning("monitor.auto_lock_failed", campaign=r.campaign_id, title=r.campaign_title, reason=r.message)
+
+                # Send Telegram summary if any lock was attempted
+                summary = self.client.get_last_cycle_summary()
+                if asyncio.iscoroutine(summary):
+                    summary = await summary
+                if isinstance(summary, dict) and summary.get("attempted", 0) > 0:
+                    self._fire_background_task(self._send_autolock_summary(summary))
 
             for c in raw_campaigns:
                 if c.id not in self._known_campaigns:
@@ -287,7 +325,7 @@ class CampaignMonitor:
                 )
                 if campaign.is_lockable:
                     self.logger.info("monitor.new_campaign", campaign=campaign.id, payout=campaign.payout_amount)
-                    await self.notifier.notify_campaign_dropped(campaign)
+                    self._fire_background_task(self.notifier.notify_campaign_dropped(campaign))
                 else:
                     rejection_reason = (
                         "already_locked" if campaign.myLock is not None else
@@ -314,7 +352,7 @@ class CampaignMonitor:
                     # Only notify if campaign is active and might become available later.
                     # Skip expired, no-slots, locked, submitted — user can't act on these.
                     if rejection_reason not in ("already_locked", "already_submitted", "no_slots", "expired", "status_not_active", "unknown"):
-                        await self.notifier.notify_campaign_dropped(campaign)
+                        self._fire_background_task(self.notifier.notify_campaign_dropped(campaign))
 
             # Update known set — only persist to disk when the set changes.
             # Previously this wrote on every cycle (every 10s × 3 accounts = 18 writes/min)
@@ -326,31 +364,6 @@ class CampaignMonitor:
             else:
                 self._known_campaigns = new_known
             self._last_check = datetime.utcnow()
-
-            # Auto-lock if enabled (pass raw campaigns to reuse connection results concurrently)
-            if settings.auto_lock_enabled and raw_campaigns:
-                results = await self.client.auto_lock_available(campaigns=raw_campaigns)
-                from app.services.lock_ledger import record_lock_attempt
-                for r in results:
-                    record_lock_attempt(
-                        account_name=self.account_label,
-                        campaign_id=r.campaign_id,
-                        campaign_title=r.campaign_title,
-                        success=r.success,
-                        slot_number=r.slot_number,
-                        strategy=r.strategy_used,
-                        response_time_ms=r.response_time_ms,
-                        message=r.message,
-                    )
-                    if r.success:
-                        self.logger.info("monitor.auto_locked", campaign=r.campaign_id, title=r.campaign_title)
-                    else:
-                        self.logger.warning("monitor.auto_lock_failed", campaign=r.campaign_id, title=r.campaign_title, reason=r.message)
-
-                # Send Telegram summary if any lock was attempted
-                summary = self.client.get_last_cycle_summary()
-                if summary and summary.get("attempted", 0) > 0:
-                    await self._send_autolock_summary(summary)
 
             # ── Dynamic interval logic ────────────────────────────────────────
             # Goal: always poll at POLL_INTERVAL_SECONDS (user configured 3s).

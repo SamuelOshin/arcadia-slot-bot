@@ -77,7 +77,7 @@ class APIStrategy(BaseStrategy):
         # Lock requests get a tighter budget: a slow lock is a lost slot.
         if "timeout" not in kwargs:
             if method == "POST":
-                kwargs["timeout"] = aiohttp.ClientTimeout(total=4.0, connect=1.5)
+                kwargs["timeout"] = aiohttp.ClientTimeout(total=3.0, connect=1.5)
             else:
                 kwargs["timeout"] = aiohttp.ClientTimeout(total=5.0, connect=3.0)
 
@@ -559,7 +559,7 @@ class APIStrategy(BaseStrategy):
 
         # ONE re-fetch if we exhausted the list but still have time budget left
         elapsed_ms = (time.time() - start_time) * 1000
-        if elapsed_ms < self.MAX_LOCK_BUDGET_MS:
+        if not result.definitive and elapsed_ms < self.MAX_LOCK_BUDGET_MS:
             self.logger.info("api.claim_slot.refetch", campaign_id=campaign_id, elapsed_ms=elapsed_ms)
             refetched = await self.get_campaign(campaign_id)
             if refetched and refetched.eligible_slots():
@@ -590,37 +590,16 @@ class APIStrategy(BaseStrategy):
         eligible: list,
         start_time: float,
     ) -> SlotLockResult:
-        """Sequential slot try-lock loop with attempt ceiling and time budget.
+        """Parallel slot try-lock loop with attempt ceiling and time budget.
 
-        Returns on first success, or a non-definitive failure after exhaustion
-        so the caller can decide whether to re-fetch.
+        Fires batches of up to 3 eligible slots concurrently. Returns on first success,
+        or a non-definitive failure after exhaustion so the caller can decide whether to re-fetch.
         """
         attempts = 0
         last_result = None
+        BATCH_SIZE = 3
 
-        for slot in eligible:
-            elapsed_ms = (time.time() - start_time) * 1000
-
-            if elapsed_ms >= self.MAX_LOCK_BUDGET_MS:
-                self.logger.warning(
-                    "api.claim_slot.budget_exceeded",
-                    campaign_id=campaign_id,
-                    attempts=attempts,
-                    elapsed_ms=elapsed_ms,
-                )
-                break
-
-            if attempts >= self.MAX_SLOT_ATTEMPTS:
-                self.logger.warning(
-                    "api.claim_slot.max_attempts_reached",
-                    campaign_id=campaign_id,
-                    attempts=attempts,
-                )
-                break
-
-            attempts += 1
-
-            # Build request body — the API expects slotLockId from the detail endpoint
+        async def _attempt_slot(slot: dict, attempt_num: int) -> Tuple[Optional[SlotLockResult], bool]:
             slot_id = slot.get("_id") or slot.get("id")
             slot_number = (
                 slot.get("slotNumber")
@@ -635,7 +614,7 @@ class APIStrategy(BaseStrategy):
             self.logger.info(
                 "api.claim_slot.attempt",
                 campaign_id=campaign_id,
-                attempt=attempts,
+                attempt=attempt_num,
                 slot_id=slot_id,
                 slot_number=slot_number,
             )
@@ -647,7 +626,7 @@ class APIStrategy(BaseStrategy):
                 raise
             except Exception as e:
                 self.logger.error("api.claim_slot.request_error", campaign_id=campaign_id, error=str(e))
-                continue
+                return None, False
 
             elapsed_ms = (time.time() - start_time) * 1000
 
@@ -662,7 +641,7 @@ class APIStrategy(BaseStrategy):
                 self.logger.info(
                     "api.claim_slot.success",
                     campaign_id=campaign_id,
-                    attempt=attempts,
+                    attempt=attempt_num,
                     slot_id=slot_id,
                     slot_number=slot_number,
                     elapsed_ms=elapsed_ms,
@@ -672,31 +651,30 @@ class APIStrategy(BaseStrategy):
                     campaign_id=campaign_id,
                     campaign_title=title,
                     slot_number=slot_number,
-                    message=f"Slot claimed on attempt {attempts} (slot_id={slot_id})",
+                    message=f"Slot claimed on attempt {attempt_num} (slot_id={slot_id})",
                     strategy_used=self.name,
                     response_time_ms=elapsed_ms,
                     definitive=True,
-                )
+                ), False
 
             elif status == 409:
                 # Expected slot collision — NOT a circuit breaker failure event
                 self.logger.info(
                     "api.claim_slot.collision",
                     campaign_id=campaign_id,
-                    attempt=attempts,
+                    attempt=attempt_num,
                     slot_id=slot_id,
                     slot_number=slot_number,
                 )
-                last_result = SlotLockResult(
+                return SlotLockResult(
                     success=False,
                     campaign_id=campaign_id,
                     campaign_title=campaign_title,
-                    message=f"Slot taken (attempt {attempts}, slot_id={slot_id}), trying next",
+                    message=f"Slot taken (attempt {attempt_num}, slot_id={slot_id}), trying next",
                     strategy_used=self.name,
                     response_time_ms=elapsed_ms,
                     definitive=False,  # Not definitive — keep iterating
-                )
-                continue  # Instant next slot
+                ), False
 
             elif status in (401, 403):
                 # Since genuine auth failures raise AuthError in _request(),
@@ -705,12 +683,12 @@ class APIStrategy(BaseStrategy):
                 self.logger.warning(
                     "api.claim_slot.permission_denied",
                     campaign_id=campaign_id,
-                    attempt=attempts,
+                    attempt=attempt_num,
                     slot_id=slot_id,
                     status=status,
                     body=resp_text[:300],
                 )
-                last_result = SlotLockResult(
+                return SlotLockResult(
                     success=False,
                     campaign_id=campaign_id,
                     campaign_title=campaign_title,
@@ -718,8 +696,7 @@ class APIStrategy(BaseStrategy):
                     strategy_used=self.name,
                     response_time_ms=elapsed_ms,
                     definitive=False,
-                )
-                continue
+                ), False
 
             else:
                 # Unexpected error on this slot — stop the whole sequence
@@ -738,7 +715,73 @@ class APIStrategy(BaseStrategy):
                     strategy_used=self.name,
                     response_time_ms=elapsed_ms,
                     definitive=True,
+                ), True
+
+        slot_idx = 0
+        while slot_idx < len(eligible):
+            elapsed_ms = (time.time() - start_time) * 1000
+            if elapsed_ms >= self.MAX_LOCK_BUDGET_MS:
+                self.logger.warning(
+                    "api.claim_slot.budget_exceeded",
+                    campaign_id=campaign_id,
+                    attempts=attempts,
+                    elapsed_ms=elapsed_ms,
                 )
+                break
+
+            if attempts >= self.MAX_SLOT_ATTEMPTS:
+                self.logger.warning(
+                    "api.claim_slot.max_attempts_reached",
+                    campaign_id=campaign_id,
+                    attempts=attempts,
+                )
+                break
+
+            remaining_attempts = self.MAX_SLOT_ATTEMPTS - attempts
+            current_batch_size = min(BATCH_SIZE, remaining_attempts, len(eligible) - slot_idx)
+            if current_batch_size <= 0:
+                break
+
+            batch = eligible[slot_idx : slot_idx + current_batch_size]
+            slot_idx += current_batch_size
+
+            tasks = []
+            for i, slot in enumerate(batch):
+                attempts += 1
+                tasks.append(asyncio.create_task(_attempt_slot(slot, attempts)))
+
+            batch_success = None
+            unexpected_result = None
+
+            try:
+                for coro in asyncio.as_completed(tasks):
+                    try:
+                        res, is_unexpected = await coro
+                    except AuthError:
+                        raise
+                    except Exception as e:
+                        self.logger.error("api.claim_slot.task_exception", error=str(e))
+                        continue
+
+                    if res is not None:
+                        if res.success:
+                            batch_success = res
+                            break
+                        elif is_unexpected:
+                            unexpected_result = res
+                        else:
+                            last_result = res
+            finally:
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            if batch_success:
+                return batch_success
+
+            if unexpected_result:
+                return unexpected_result
 
         # All eligible slots exhausted or ceiling/budget hit
         total_elapsed = (time.time() - start_time) * 1000

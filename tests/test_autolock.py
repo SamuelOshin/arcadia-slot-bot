@@ -840,6 +840,242 @@ class TestMultiAccount:
 
 
 # ===========================================================================
+# 8. Speed Optimization Tests (Parallel slots, POST timeout, Autolock timing)
+# ===========================================================================
+
+class TestSpeedOptimizations:
+    def _make_strategy(self):
+        from app.strategies.api_strategy import APIStrategy
+        session = _make_session()
+        strategy = APIStrategy.__new__(APIStrategy)
+        strategy.session = session
+        strategy.base_url = "https://arcadia-roster.up.railway.app/api"
+        strategy.logger = MagicMock()
+        strategy.logger.warning = MagicMock()
+        strategy.logger.info = MagicMock()
+        strategy.logger.error = MagicMock()
+        strategy.logger.debug = MagicMock()
+        strategy._request = AsyncMock()
+        strategy.name = "api"
+        strategy.MAX_SLOT_ATTEMPTS = 10
+        strategy.MAX_LOCK_BUDGET_MS = 5000.0
+        return strategy
+
+    @pytest.mark.asyncio
+    async def test_parallel_batches_dispatches_three_concurrently(self):
+        """First batch fires 3 slots concurrently; on all 409, moves to next batch."""
+        import time
+        strategy = self._make_strategy()
+        # 4 slots: first 3 return 409, 4th returns 200
+        strategy._request.side_effect = [
+            (409, {"message": "taken"}, "taken", {}),
+            (409, {"message": "taken"}, "taken", {}),
+            (409, {"message": "taken"}, "taken", {}),
+            (200, {"title": "Success Campaign", "slotNumber": 4}, "ok", {}),
+        ]
+
+        eligible = [
+            {"_id": f"slot{i}", "slotNumber": i}
+            for i in range(1, 5)
+        ]
+        result = await strategy._try_lock_slots("camp-123", "Title", eligible, time.time())
+
+        assert strategy._request.call_count == 4
+        assert result.success is True
+        assert result.slot_number == 4
+
+    @pytest.mark.asyncio
+    async def test_first_success_in_batch_returns_immediately(self):
+        """When slot 2 in a batch succeeds, success is returned."""
+        import time
+        strategy = self._make_strategy()
+        strategy._request.side_effect = [
+            (409, {"message": "taken"}, "taken", {}),
+            (200, {"title": "Winner", "slotNumber": 2}, "ok", {}),
+            (409, {"message": "taken"}, "taken", {}),
+        ]
+
+        eligible = [
+            {"_id": f"slot{i}", "slotNumber": i}
+            for i in range(1, 4)
+        ]
+        result = await strategy._try_lock_slots("camp-123", "Title", eligible, time.time())
+
+        assert result.success is True
+        assert result.slot_number == 2
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_halts_further_batches(self):
+        """Unexpected 500 status returns definitive failure without attempting batch 2."""
+        import time
+        strategy = self._make_strategy()
+        strategy._parse_error = MagicMock(return_value="Server Error")
+        strategy._request.side_effect = [
+            (409, {"message": "taken"}, "taken", {}),
+            (500, None, "Internal Server Error", {}),
+            (409, {"message": "taken"}, "taken", {}),
+            (200, {"title": "NotReached"}, "ok", {}),  # slot 4 in batch 2
+        ]
+
+        eligible = [
+            {"_id": f"slot{i}", "slotNumber": i}
+            for i in range(1, 5)
+        ]
+        result = await strategy._try_lock_slots("camp-123", "Title", eligible, time.time())
+
+        assert result.success is False
+        assert result.definitive is True
+        # Batch 2 (slot 4) should NOT have been called
+        assert strategy._request.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_post_request_timeout_is_tightened_to_three_seconds(self):
+        """POST requests must use 3.0s total timeout (not 4.0s)."""
+        import aiohttp
+        from unittest.mock import MagicMock
+        from app.strategies.api_strategy import APIStrategy
+
+        session = _make_session()
+        strategy = APIStrategy.__new__(APIStrategy)
+        strategy.session = session
+        strategy.base_url = "https://example.com"
+        strategy.logger = MagicMock()
+        strategy.client = MagicMock()
+
+        # Mock the context manager returned by self.client.request
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.headers = {}
+        mock_response.text.return_value = "{}"
+        mock_response.cookies = {}
+
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+        strategy.client.request.return_value = mock_cm
+
+        await strategy._request("POST", "https://example.com/test")
+
+        strategy.client.request.assert_called_once()
+        call_kwargs = strategy.client.request.call_args[1]
+        timeout = call_kwargs.get("timeout")
+        assert isinstance(timeout, aiohttp.ClientTimeout)
+        assert timeout.total == 3.0
+        assert timeout.connect == 1.5
+
+    @pytest.mark.asyncio
+    async def test_autolock_fires_before_notifications(self):
+        """auto_lock_available must be invoked before notify_campaign_dropped."""
+        mock_client = AsyncMock()
+        mock_notifier = AsyncMock()
+        call_order = []
+
+        async def record_lock(*args, **kwargs):
+            call_order.append("autolock")
+            return [SlotLockResult(success=True, campaign_id="c2", campaign_title="T", message="ok", strategy_used="api", response_time_ms=10)]
+
+        async def record_notify(*args, **kwargs):
+            call_order.append("notify")
+
+        mock_client.auto_lock_available = AsyncMock(side_effect=record_lock)
+        mock_notifier.notify_campaign_dropped = AsyncMock(side_effect=record_notify)
+
+        c1 = _make_campaign(id="c1", slots_remaining=5)
+        c2 = _make_campaign(id="c2", slots_remaining=3)
+        mock_client.router.list_campaigns.return_value = [c1, c2]
+
+        monitor = CampaignMonitor(client=mock_client, notifier=mock_notifier)
+        monitor._is_warmed_up = True
+        monitor._known_campaigns = {"c1"}
+
+        with patch.object(settings, "auto_lock_enabled", True):
+            await monitor.check_and_lock()
+            # Give background task event loop cycle to start
+            await asyncio.sleep(0.01)
+
+        assert "autolock" in call_order
+        assert "notify" in call_order
+        assert call_order.index("autolock") < call_order.index("notify")
+
+    def test_env_config_defaults(self):
+        """Verify .env has POLL_INTERVAL_SECONDS=3 and AUTO_LOCK_MAX_CONCURRENT=5."""
+        from app.config import BotConfig
+        cfg = BotConfig()
+        assert cfg.poll_interval_seconds == 3
+        assert cfg.auto_lock_max_concurrent == 5
+
+    @pytest.mark.asyncio
+    async def test_all_slots_409_unpacks_cleanly_without_task_exceptions(self):
+        """When all slots collide with 409, ensure clean tuple unpacking with no task_exception."""
+        import time
+        strategy = self._make_strategy()
+        strategy._request.side_effect = [
+            (409, {"message": "taken"}, "taken", {}),
+            (409, {"message": "taken"}, "taken", {}),
+            (409, {"message": "taken"}, "taken", {}),
+        ]
+
+        eligible = [
+            {"_id": f"slot{i}", "slotNumber": i}
+            for i in range(1, 4)
+        ]
+        result = await strategy._try_lock_slots("camp-123", "Title", eligible, time.time())
+
+        # No logger errors (no TypeError from unpacking non-tuple)
+        strategy.logger.error.assert_not_called()
+        assert result.success is False
+        assert result.definitive is False
+        assert "Slot taken" in result.message
+
+    @pytest.mark.asyncio
+    async def test_outer_cancellation_cleans_up_batch_tasks(self):
+        """Ensure batch tasks are cancelled and cleaned up if the outer loop is cancelled."""
+        import time
+        strategy = self._make_strategy()
+
+        hanging_event = asyncio.Event()
+
+        async def _hang(*args, **kwargs):
+            await hanging_event.wait()
+            return (200, {}, "ok", {})
+
+        strategy._request.side_effect = _hang
+
+        eligible = [{"_id": "slot1", "slotNumber": 1}, {"_id": "slot2", "slotNumber": 2}]
+        task = asyncio.create_task(strategy._try_lock_slots("camp-123", "Title", eligible, time.time()))
+
+        await asyncio.sleep(0.02)
+        assert not task.done()
+
+        # Cancel the outer task
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_campaign_monitor_retains_and_discards_background_tasks(self):
+        """Ensure CampaignMonitor retains background tasks in _background_tasks and discards them."""
+        mock_client = AsyncMock()
+        mock_notifier = AsyncMock()
+
+        c1 = _make_campaign(id="c1", slots_remaining=5)
+        c2 = _make_campaign(id="c2", slots_remaining=3)
+        mock_client.router.list_campaigns.return_value = [c1, c2]
+
+        monitor = CampaignMonitor(client=mock_client, notifier=mock_notifier)
+        monitor._is_warmed_up = True
+        monitor._known_campaigns = {"c1"}
+
+        with patch.object(settings, "auto_lock_enabled", False):
+            await monitor.check_and_lock()
+
+        # The background task was created and tracked
+        await asyncio.sleep(0.05)
+        # Once finished, background tasks set should be cleaned up
+        assert len(monitor._background_tasks) == 0
+
+
+# ===========================================================================
 # Runner (also works with: uv run pytest tests/test_autolock.py -v)
 # ===========================================================================
 
