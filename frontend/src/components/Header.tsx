@@ -15,6 +15,7 @@ interface HeaderProps {
   stats: BotStats | null;
   isConnected: boolean;
   onTogglePause: () => void;
+  onToggleAutoLock: () => void;
   onRefresh: () => void;
   onOpenSettings: () => void;
 }
@@ -23,10 +24,12 @@ export const Header: React.FC<HeaderProps> = ({
   stats,
   isConnected,
   onTogglePause,
+  onToggleAutoLock,
   onRefresh,
   onOpenSettings,
 }) => {
   const isPaused = stats?.is_paused ?? false;
+  const autoLockEnabled = stats?.auto_lock_enabled ?? false;
 
   return (
     <header className="sticky top-0 z-40 glass-panel border-b border-slate-800/80 px-4 lg:px-8 py-3.5 mb-6">
@@ -96,27 +99,78 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right Action Controls */}
         <div className="flex items-center space-x-2.5">
-          {/* Pause / Resume Toggle */}
-          <button
-            onClick={onTogglePause}
-            className={`flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              isPaused 
-                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20' 
-                : 'bg-rose-500/10 text-rose-400 border border-rose-500/30 hover:bg-rose-500/20'
-            }`}
+
+          {/* Auto Lock Toggle */}
+          <Tooltip
+            content={
+              <div className="space-y-1.5">
+                <p className="font-semibold text-white">
+                  Auto Lock — {autoLockEnabled ? 'ON 🟢' : 'OFF ⚫'}
+                </p>
+                <p className="text-slate-300 leading-snug">
+                  {autoLockEnabled
+                    ? 'Bot automatically claims available slots on every poll cycle.'
+                    : "Bot is watching campaigns but won't claim slots automatically."}
+                </p>
+                <p className="text-slate-400 border-t border-slate-700 pt-1.5 leading-snug">
+                  💡 Turn <span className="text-slate-200 font-medium">OFF</span> to monitor-only — lock slots manually from the Campaigns tab.
+                </p>
+              </div>
+            }
           >
-            {isPaused ? <PlayCircle className="w-4 h-4" /> : <PauseCircle className="w-4 h-4" />}
-            <span>{isPaused ? 'Resume Bot' : 'Pause Bot'}</span>
-          </button>
+            <button
+              onClick={onToggleAutoLock}
+              className={`flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                autoLockEnabled
+                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20'
+                  : 'bg-slate-800 text-slate-400 border border-slate-700 hover:border-slate-600 hover:text-white'
+              }`}
+            >
+              <Lock className="w-4 h-4" />
+              <span className="hidden sm:inline">Auto Lock {autoLockEnabled ? 'ON' : 'OFF'}</span>
+            </button>
+          </Tooltip>
+
+          {/* Pause / Resume Toggle */}
+          <Tooltip
+            content={
+              <div className="space-y-1.5">
+                <p className="font-semibold text-white">
+                  {isPaused ? 'Bot Paused ⏸' : 'Bot Running ▶'}
+                </p>
+                <p className="text-slate-300 leading-snug">
+                  {isPaused
+                    ? 'Everything is frozen — no polling, no locking, no notifications.'
+                    : 'Pausing is a full kill-switch — stops polling, locking, and all notifications.'}
+                </p>
+                <p className="text-slate-400 border-t border-slate-700 pt-1.5 leading-snug">
+                  💡 To keep <span className="text-slate-200 font-medium">watching</span> campaigns without claiming, use <span className="text-slate-200 font-medium">Auto Lock OFF</span> instead.
+                </p>
+              </div>
+            }
+          >
+            <button
+              onClick={onTogglePause}
+              className={`flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                isPaused 
+                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20' 
+                  : 'bg-rose-500/10 text-rose-400 border border-rose-500/30 hover:bg-rose-500/20'
+              }`}
+            >
+              {isPaused ? <PlayCircle className="w-4 h-4" /> : <PauseCircle className="w-4 h-4" />}
+              <span>{isPaused ? 'Resume Bot' : 'Pause Bot'}</span>
+            </button>
+          </Tooltip>
 
           {/* Manual Refresh */}
-          <button
-            onClick={onRefresh}
-            className="p-2 rounded-lg bg-slate-900 text-slate-300 border border-slate-800 hover:border-slate-700 hover:text-white transition-all"
-            title="Refresh Data"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </button>
+          <Tooltip content={<p className="text-slate-300">Manually refresh all dashboard data.</p>}>
+            <button
+              onClick={onRefresh}
+              className="p-2 rounded-lg bg-slate-900 text-slate-300 border border-slate-800 hover:border-slate-700 hover:text-white transition-all"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
+          </Tooltip>
 
           {/* Settings Modal Toggle */}
           <button
@@ -132,3 +186,31 @@ export const Header: React.FC<HeaderProps> = ({
     </header>
   );
 };
+
+/* ─── Reusable Tooltip ────────────────────────────────────────────────────── */
+
+interface TooltipProps {
+  content: React.ReactNode;
+  children: React.ReactElement;
+}
+
+const Tooltip: React.FC<TooltipProps> = ({ content, children }) => (
+  <div className="relative group inline-flex">
+    {children}
+    {/* Popover card — floats above the trigger on hover */}
+    <div
+      className="
+        pointer-events-none absolute bottom-full right-0 mb-2.5 z-50
+        w-64 rounded-xl bg-slate-900 border border-slate-700
+        px-3.5 py-3 text-xs font-mono shadow-2xl
+        opacity-0 translate-y-1 scale-95
+        group-hover:opacity-100 group-hover:translate-y-0 group-hover:scale-100
+        transition-all duration-150 ease-out
+      "
+    >
+      {content}
+      {/* Downward arrow caret */}
+      <span className="absolute -bottom-1.5 right-4 w-3 h-3 bg-slate-900 border-r border-b border-slate-700 rotate-45" />
+    </div>
+  </div>
+);

@@ -148,6 +148,18 @@ export const App: React.FC = () => {
     }
   };
 
+  // Toggle Auto Lock On / Off
+  const handleToggleAutoLock = async () => {
+    try {
+      const res = await fetch('/api/v1/dashboard/toggle-autolock', { method: 'POST' });
+      if (res.ok) {
+        fetchDashboardData();
+      }
+    } catch (err) {
+      console.error('Failed to toggle auto lock:', err);
+    }
+  };
+
   // Refresh Account Session
   const handleRefreshAccountSession = async (index: number) => {
     try {
@@ -185,6 +197,7 @@ export const App: React.FC = () => {
         stats={stats}
         isConnected={isConnected}
         onTogglePause={handleTogglePause}
+        onToggleAutoLock={handleToggleAutoLock}
         onRefresh={() => {
           fetchDashboardData();
           fetchCampaigns();

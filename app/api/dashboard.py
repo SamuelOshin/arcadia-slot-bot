@@ -7,6 +7,7 @@ from app.dependencies import get_config
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 
 _is_paused = False
+_auto_lock_override: bool | None = None  # None = use settings default
 
 
 @router.get("/config")
@@ -81,12 +82,15 @@ async def get_bot_stats(request: Request):
     total_locked_today = sum(getattr(m.client, "_slots_locked_today", 0) for m in monitors)
     active_accounts = sum(1 for m in monitors if m.session.is_valid)
 
+    # Runtime override takes precedence over the env-configured default
+    effective_auto_lock = _auto_lock_override if _auto_lock_override is not None else settings.auto_lock_enabled
+
     return {
         "total_accounts": len(monitors),
         "active_accounts": active_accounts,
         "slots_locked_today": total_locked_today,
         "is_paused": _is_paused,
-        "auto_lock_enabled": settings.auto_lock_enabled,
+        "auto_lock_enabled": effective_auto_lock,
         "poll_interval": settings.poll_interval_seconds,
     }
 
@@ -111,3 +115,21 @@ async def resume_bot(request: Request):
     if scheduler:
         scheduler.resume()
     return {"status": "resumed", "is_paused": False}
+
+
+@router.post("/toggle-autolock")
+async def toggle_auto_lock(request: Request):
+    """Toggle the auto-lock feature on or off at runtime."""
+    global _auto_lock_override
+    # Determine current effective value then flip it
+    current = _auto_lock_override if _auto_lock_override is not None else settings.auto_lock_enabled
+    _auto_lock_override = not current
+
+    # Propagate to monitors so they respect the new value immediately
+    monitors = getattr(request.app.state, "monitors", [])
+    for monitor in monitors:
+        # CampaignMonitor reads settings.auto_lock_enabled; patch the runtime attribute
+        if hasattr(monitor, "auto_lock_enabled"):
+            monitor.auto_lock_enabled = _auto_lock_override
+
+    return {"auto_lock_enabled": _auto_lock_override}

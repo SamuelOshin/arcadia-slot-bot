@@ -14,6 +14,7 @@ Tests the full auto-lock pipeline to prevent regressions in:
 import asyncio
 import sys
 import os
+import time
 import pytest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1073,6 +1074,70 @@ class TestSpeedOptimizations:
         await asyncio.sleep(0.05)
         # Once finished, background tasks set should be cleaned up
         assert len(monitor._background_tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_fast_lock_confirms_existing_lock_on_409(self):
+        """fast_lock must check campaign detail on 409 and report success if user already holds a lock."""
+        from app.strategies.api_strategy import APIStrategy
+
+        session = _make_session()
+        strategy = APIStrategy.__new__(APIStrategy)
+        strategy.session = session
+        strategy.base_url = "https://example.com"
+        strategy.logger = MagicMock()
+        strategy._parse_error = MagicMock(return_value="conflict")
+
+        async def _mock_request(method, url, **kwargs):
+            if method == "POST":
+                # Simulated collision / duplicate lock attempt
+                return (409, {"error": "All slots are filled."}, "conflict", {})
+            elif method == "GET":
+                # Detail confirmation check returns user's committed lock
+                return (200, {
+                    "campaign": {"title": "Confirmed Campaign"},
+                    "myLock": {"_id": "lock-99", "slotNumber": 16, "status": "locked"},
+                }, "ok", {})
+            return (404, {}, "not found", {})
+
+        strategy._request = AsyncMock(side_effect=_mock_request)
+
+        result = await strategy.fast_lock("camp-99")
+        assert result.success is True
+        assert result.slot_number == 16
+        assert "confirmed" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_try_lock_slots_confirms_existing_lock_after_exhaustion(self):
+        """_try_lock_slots must verify campaign detail on exhaustion and flip to success if myLock is set."""
+        from app.strategies.api_strategy import APIStrategy
+
+        session = _make_session()
+        strategy = APIStrategy.__new__(APIStrategy)
+        strategy.session = session
+        strategy.base_url = "https://example.com"
+        strategy.logger = MagicMock()
+        strategy._parse_error = MagicMock(return_value="conflict")
+        strategy.MAX_SLOT_ATTEMPTS = 2
+        strategy.MAX_LOCK_BUDGET_MS = 1000.0
+
+        async def _mock_request(method, url, **kwargs):
+            if method == "POST":
+                return (409, {"error": "Slot taken"}, "Slot taken", {})
+            elif method == "GET":
+                return (200, {
+                    "campaign": {"title": "Exhausted But Won"},
+                    "myLock": {"_id": "lock-88", "slotNumber": 8, "status": "locked"},
+                }, "ok", {})
+            return (404, {}, "not found", {})
+
+        strategy._request = AsyncMock(side_effect=_mock_request)
+
+        eligible = [{"_id": "s1", "slotNumber": 1}, {"_id": "s2", "slotNumber": 2}]
+        result = await strategy._try_lock_slots("camp-88", "Exhausted But Won", eligible, time.time())
+
+        assert result.success is True
+        assert result.slot_number == 8
+        assert "confirmed" in result.message.lower()
 
 
 # ===========================================================================

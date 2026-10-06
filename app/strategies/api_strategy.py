@@ -193,7 +193,7 @@ class APIStrategy(BaseStrategy):
 
     # --- claim_slot campaign constants ---
     MAX_SLOT_ATTEMPTS = 10         # give up after this many collisions
-    MAX_LOCK_BUDGET_MS = 5000.0    # hard time-budget across all slot attempts
+    MAX_LOCK_BUDGET_MS = 7000.0    # hard time-budget across all slot attempts (7s to allow batches under load)
 
     async def get_campaign(self, campaign_id: str) -> Optional[Campaign]:
         """Fetch individual campaign details, including scheduledSlots.
@@ -249,6 +249,12 @@ class APIStrategy(BaseStrategy):
                             count=len(scheduled),
                             first_slot_keys=list(scheduled[0].keys()),
                         )
+
+                # Hydrate root-level myLock and mySubmission (Arcadia returns these at root)
+                if "myLock" in data and data.get("myLock"):
+                    campaign.myLock = data.get("myLock")
+                if "mySubmission" in data and data.get("mySubmission"):
+                    campaign.mySubmission = data.get("mySubmission")
 
                 return campaign
 
@@ -311,6 +317,26 @@ class APIStrategy(BaseStrategy):
                 )
 
             elif status == 409:
+                try:
+                    v_status, v_data, _, _ = await self._request("GET", f"{self.base_url}/clip/campaigns/{campaign_id}", timeout=aiohttp.ClientTimeout(total=2.5))
+                    if v_status == 200 and isinstance(v_data, dict):
+                        confirmed_lock = v_data.get("myLock") or (v_data.get("campaign") or {}).get("myLock")
+                        if confirmed_lock and isinstance(confirmed_lock, dict):
+                            c_slot = confirmed_lock.get("slotNumber")
+                            c_title = v_data.get("title") or (v_data.get("campaign") or {}).get("title") or campaign_id
+                            return SlotLockResult(
+                                success=True,
+                                campaign_id=campaign_id,
+                                campaign_title=c_title,
+                                slot_number=c_slot,
+                                message=f"Slot locked successfully via API (confirmed on Arcadia: #{c_slot})",
+                                strategy_used=self.name,
+                                response_time_ms=elapsed_ms,
+                                definitive=True,
+                            )
+                except Exception:
+                    pass
+
                 error_detail = self._parse_error(data, resp_text)
                 return SlotLockResult(
                     success=False,
@@ -791,6 +817,35 @@ class APIStrategy(BaseStrategy):
             attempts=attempts,
             elapsed_ms=total_elapsed,
         )
+
+        # Confirmation check: in high drop contention or when parallel requests race,
+        # Arcadia may have committed our lock even if subsequent requests returned 409 or timed out.
+        try:
+            v_status, v_data, _, _ = await self._request("GET", f"{self.base_url}/clip/campaigns/{campaign_id}", timeout=aiohttp.ClientTimeout(total=2.5))
+            if v_status == 200 and isinstance(v_data, dict):
+                confirmed_lock = v_data.get("myLock") or (v_data.get("campaign") or {}).get("myLock")
+                if confirmed_lock and isinstance(confirmed_lock, dict):
+                    c_slot = confirmed_lock.get("slotNumber")
+                    self.logger.info(
+                        "api.claim_slot.confirmed_after_exhaustion",
+                        campaign_id=campaign_id,
+                        slot_number=c_slot,
+                        lock_id=confirmed_lock.get("_id"),
+                        elapsed_ms=total_elapsed,
+                    )
+                    return SlotLockResult(
+                        success=True,
+                        campaign_id=campaign_id,
+                        campaign_title=campaign_title,
+                        slot_number=c_slot,
+                        message=f"Slot locked successfully (confirmed on Arcadia: #{c_slot})",
+                        strategy_used=self.name,
+                        response_time_ms=total_elapsed,
+                        definitive=True,
+                    )
+        except Exception as ve:
+            self.logger.warning("api.claim_slot.verify_failed", campaign_id=campaign_id, error=str(ve))
+
         return last_result or SlotLockResult(
             success=False,
             campaign_id=campaign_id,
@@ -849,6 +904,26 @@ class APIStrategy(BaseStrategy):
                     definitive=True,
                 )
             elif status == 409:
+                try:
+                    v_status, v_data, _, _ = await self._request("GET", f"{self.base_url}/clip/campaigns/{campaign_id}", timeout=aiohttp.ClientTimeout(total=2.5))
+                    if v_status == 200 and isinstance(v_data, dict):
+                        confirmed_lock = v_data.get("myLock") or (v_data.get("campaign") or {}).get("myLock")
+                        if confirmed_lock and isinstance(confirmed_lock, dict):
+                            c_slot = confirmed_lock.get("slotNumber")
+                            c_title = v_data.get("title") or (v_data.get("campaign") or {}).get("title") or campaign_id
+                            return SlotLockResult(
+                                success=True,
+                                campaign_id=campaign_id,
+                                campaign_title=c_title,
+                                slot_number=c_slot,
+                                message=f"Slot locked successfully (confirmed on Arcadia: #{c_slot})",
+                                strategy_used="api-fast",
+                                response_time_ms=elapsed_ms,
+                                definitive=True,
+                            )
+                except Exception:
+                    pass
+
                 return SlotLockResult(
                     success=False,
                     campaign_id=campaign_id,
