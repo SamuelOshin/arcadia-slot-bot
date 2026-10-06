@@ -197,20 +197,20 @@ interface TooltipProps {
 const Tooltip: React.FC<TooltipProps> = ({ content, children }) => (
   <div className="relative group inline-flex">
     {children}
-    {/* Popover card — floats above the trigger on hover */}
+    {/* Popover card — floats below the trigger on hover to avoid screen cut-off */}
     <div
       className="
-        pointer-events-none absolute bottom-full right-0 mb-2.5 z-50
-        w-64 rounded-xl bg-slate-900 border border-slate-700
+        pointer-events-none absolute top-full right-0 mt-2 z-50
+        w-64 rounded-xl bg-slate-900/95 backdrop-blur-md border border-slate-700
         px-3.5 py-3 text-xs font-mono shadow-2xl
-        opacity-0 translate-y-1 scale-95
+        opacity-0 -translate-y-1 scale-95
         group-hover:opacity-100 group-hover:translate-y-0 group-hover:scale-100
         transition-all duration-150 ease-out
       "
     >
+      {/* Upward arrow caret */}
+      <span className="absolute -top-1.5 right-4 w-3 h-3 bg-slate-900 border-l border-t border-slate-700 rotate-45" />
       {content}
-      {/* Downward arrow caret */}
-      <span className="absolute -bottom-1.5 right-4 w-3 h-3 bg-slate-900 border-r border-b border-slate-700 rotate-45" />
     </div>
   </div>
 );
