@@ -57,8 +57,9 @@ async def lifespan(app: FastAPI):
     monitors = []
     # Single coordinator shared across all monitors:
     # prevents multiple accounts burning daily quota on the same single-slot campaign.
-    from app.services.campaign_monitor import LockCoordinator
+    from app.services.campaign_monitor import LockCoordinator, DropBroadcaster
     coordinator = LockCoordinator()
+    broadcaster = DropBroadcaster()
 
     for i, account in enumerate(settings.accounts):
         logger.info("app.startup_account", name=account.name, account_index=i)
@@ -66,6 +67,7 @@ async def lifespan(app: FastAPI):
             account=account,
             coordinator=coordinator,
             account_index=i,
+            broadcaster=broadcaster,
         )
 
         # Try to verify and auto-login if token is available and session is missing/invalid
@@ -75,6 +77,7 @@ async def lifespan(app: FastAPI):
         monitors.append(monitor)
 
     scheduler = BotScheduler(monitors)
+    broadcaster.is_paused = lambda: scheduler.paused
     scheduler.start()
 
     app.state.scheduler = scheduler

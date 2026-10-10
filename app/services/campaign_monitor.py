@@ -6,6 +6,7 @@ import html
 import json
 import os
 import asyncio
+import time
 from typing import Set, Optional, List
 from datetime import datetime
 import structlog
@@ -53,6 +54,43 @@ class LockCoordinator:
         self._claimed.clear()
 
 
+class DropBroadcaster:
+    """Shares drop detection so every account races the moment ANY account sees a drop.
+
+    Each account polls on its own schedule, so without this the other accounts only
+    learn about a drop at their next poll (up to a full poll interval later). When one
+    account spots a newly lockable campaign it announces it here, and every other
+    account immediately runs a lock cycle of its own. Each account still applies its
+    own filters, quota and eligibility, so nothing about who may lock changes.
+    """
+
+    def __init__(self, ttl: float = 5.0):
+        self._monitors: List["CampaignMonitor"] = []
+        self._recent: dict[str, float] = {}   # campaign_id -> when it was last announced
+        self._ttl = ttl
+        self.is_paused = lambda: False
+
+    def register(self, monitor: "CampaignMonitor") -> None:
+        self._monitors.append(monitor)
+
+    def announce(self, source: "CampaignMonitor", campaign_ids: List[str]) -> int:
+        """Trigger every other account. Returns how many were triggered."""
+        now = time.monotonic()
+        self._recent = {k: t for k, t in self._recent.items() if now - t < self._ttl}
+        fresh = [c for c in campaign_ids if c not in self._recent]
+        if not fresh or self.is_paused():
+            return 0
+        for cid in fresh:
+            self._recent[cid] = now
+        triggered = 0
+        for monitor in self._monitors:
+            if monitor is not source and monitor.trigger_now():
+                triggered += 1
+        logger.info("broadcast.drop_announced", source=source.account_label,
+                    campaigns=fresh, triggered=triggered)
+        return triggered
+
+
 class CampaignMonitor:
     """Monitors Arcadia for campaign drops and available slots."""
 
@@ -63,11 +101,15 @@ class CampaignMonitor:
         account = None,  # Optional[AccountConfig]
         coordinator: Optional[LockCoordinator] = None,
         account_index: int = 0,
+        broadcaster: Optional[DropBroadcaster] = None,
     ):
         self.account = account
         self.account_label: str = account.name if account else "default"
         self.account_index: int = account_index
         self.coordinator = coordinator
+        self.broadcaster = broadcaster
+        self._cycles_in_flight = 0
+        self._trigger_pending = False
         self.session = SessionManager(account=account)
         self.circuit_breaker = CircuitBreaker()
         self.notifier = notifier or Notifier()
@@ -94,6 +136,8 @@ class CampaignMonitor:
         )
         self.logger = logger.bind(component="campaign_monitor", account=self.account_label)
         self._load_known_campaigns()
+        if broadcaster is not None:
+            broadcaster.register(self)
 
     def _fire_background_task(self, coro) -> asyncio.Task:
         """Create a background asyncio task with reference retention to prevent GC."""
@@ -201,6 +245,38 @@ class CampaignMonitor:
             except Exception as e:
                 self.logger.error("monitor.autolock_summary_failed", chat_id=chat_id, error=str(e))
 
+    def _detect_drops(self, campaigns: List[Campaign]) -> List[str]:
+        """IDs that just became lockable for us: brand new, or slots reopened."""
+        drops = []
+        for c in campaigns:
+            if not c.is_lockable:
+                continue
+            prev = self._last_campaign_states.get(c.id)
+            reopened = prev is not None and not prev.get("slots_available", True)
+            if c.id not in self._known_campaigns or reopened:
+                drops.append(c.id)
+        return drops
+
+    def trigger_now(self) -> bool:
+        """Run a lock cycle immediately (called when another account saw a drop).
+
+        Skipped if auto-lock is off or this account already has a cycle running or queued,
+        so the same account never races itself for a campaign.
+        """
+        if not settings.auto_lock_enabled or self._cycles_in_flight or self._trigger_pending:
+            return False
+        self._trigger_pending = True
+        self._fire_background_task(self._run_triggered_cycle())
+        return True
+
+    async def _run_triggered_cycle(self) -> None:
+        try:
+            await asyncio.wait_for(self.check_and_lock(), timeout=8.0)
+        except Exception as e:
+            self.logger.warning("monitor.triggered_cycle_failed", error=repr(e))
+        finally:
+            self._trigger_pending = False
+
     def _check_session_health(self) -> None:
         """Alert once when this account's session dies (re-alert every 30 min), and once on recovery."""
         now = datetime.utcnow()
@@ -218,6 +294,7 @@ class CampaignMonitor:
         """Main monitoring loop — check campaigns, act, and return next poll interval."""
         self.logger.debug("monitor.check_start")
         next_interval = settings.poll_interval_seconds
+        self._cycles_in_flight += 1
 
         try:
             # Fetch raw campaign list via router directly to get all states
@@ -250,6 +327,12 @@ class CampaignMonitor:
                             "timestamp": datetime.utcnow()
                         }
                 return next_interval
+
+            # Tell the other accounts right now, before our own lock, so they all race together.
+            if self.broadcaster is not None and settings.auto_lock_enabled:
+                drops = self._detect_drops(raw_campaigns)
+                if drops:
+                    self.broadcaster.announce(self, drops)
 
             # Auto-lock if enabled — fire immediately upon fetch before state tracking to minimize latency
             if settings.auto_lock_enabled and raw_campaigns:
@@ -397,6 +480,8 @@ class CampaignMonitor:
         except Exception as e:
             self.logger.error("monitor.check_failed", error=str(e))
             await self.notifier.notify_error("Campaign check failed", {"error": str(e)})
+        finally:
+            self._cycles_in_flight -= 1
 
         return next_interval
 

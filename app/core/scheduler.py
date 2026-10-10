@@ -17,9 +17,8 @@ logger = structlog.get_logger()
 # Prevents a slow strategy from blocking the next tick.
 _POLL_TIMEOUT_SECONDS = 8.0
 
-# Startup jitter increment per account (seconds).
-# Spreads accounts evenly across the poll window so coverage is near-continuous.
-_JITTER_STEP_SECONDS = 0.4
+# Accounts are spread evenly across the poll interval (interval / account count),
+# so with N accounts a campaign is noticed within interval/N seconds, not interval.
 
 
 class BotScheduler:
@@ -44,13 +43,13 @@ class BotScheduler:
             return
 
         # Main campaign polling job per monitor
-        # Each account is staggered by _JITTER_STEP_SECONDS so they never poll in lockstep.
+        # Each account is offset by interval/N so their polls are evenly spaced.
         # max_instances=2 allows one "late" in-flight cycle to coexist with the next tick
         # instead of silently dropping it (the root cause of missed campaign drops).
         for i, monitor in enumerate(self.monitors):
             safe_label = monitor.account_label.lower().replace(" ", "_")
             interval = self.current_intervals[monitor.account_label]
-            jitter = i * _JITTER_STEP_SECONDS
+            jitter = i * interval / len(self.monitors)
             start_date = dt.datetime.now() + dt.timedelta(seconds=jitter)
             self.scheduler.add_job(
                 self._make_poll_job(monitor),
