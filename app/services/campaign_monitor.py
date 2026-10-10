@@ -82,6 +82,7 @@ class CampaignMonitor:
         self._last_check: Optional[datetime] = None
         self._last_campaign_states: dict[str, dict] = {}
         self._is_warmed_up: bool = False   # True after first silent poll
+        self._auth_alerted_at: Optional[datetime] = None  # last "session dead" alert
         self._background_tasks: Set[asyncio.Task] = set()
         
         # Per-account known campaigns database
@@ -200,6 +201,19 @@ class CampaignMonitor:
             except Exception as e:
                 self.logger.error("monitor.autolock_summary_failed", chat_id=chat_id, error=str(e))
 
+    def _check_session_health(self) -> None:
+        """Alert once when this account's session dies (re-alert every 30 min), and once on recovery."""
+        now = datetime.utcnow()
+        if self.session.auth_failed:
+            if self._auth_alerted_at is None or (now - self._auth_alerted_at).total_seconds() >= 1800:
+                self._auth_alerted_at = now
+                self.logger.error("monitor.session_dead", account=self.account_label)
+                self._fire_background_task(self.notifier.notify_account_session_dead(self.account_label))
+        elif self._auth_alerted_at is not None:
+            self._auth_alerted_at = None
+            self.logger.info("monitor.session_recovered", account=self.account_label)
+            self._fire_background_task(self.notifier.notify_account_session_recovered(self.account_label))
+
     async def check_and_lock(self) -> int:
         """Main monitoring loop — check campaigns, act, and return next poll interval."""
         self.logger.debug("monitor.check_start")
@@ -208,6 +222,7 @@ class CampaignMonitor:
         try:
             # Fetch raw campaign list via router directly to get all states
             raw_campaigns = await self.client.router.list_campaigns()
+            self._check_session_health()
 
             any_full = False
             recently_filled = False

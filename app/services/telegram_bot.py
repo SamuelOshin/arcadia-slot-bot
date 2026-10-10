@@ -246,18 +246,30 @@ class TelegramBotService:
         await update.message.reply_text("👋 Welcome back to the Arcadia Control Panel!")
         await self.send_main_menu(update)
 
+    @staticmethod
+    def _live_label(result: str) -> str:
+        return {"live": "🟢 Live", "expired": "🔴 Expired"}.get(result, "⚪ Unknown")
+
+    async def _live_labels(self) -> List[str]:
+        """Probe every account's session against Arcadia concurrently."""
+        results = await asyncio.gather(
+            *(m.session.check_live_session() for m in self.monitors), return_exceptions=True
+        )
+        return [self._live_label(r if isinstance(r, str) else "unknown") for r in results]
+
     async def show_status(self, update: Update) -> None:
         """Helper to generate summary status message with interactive account navigation."""
         scheduler_health = "🟢 Active" if any(s._running and not s.paused for s in self.schedulers) else "🔴 Paused"
         
         # Build summary lines for all accounts
+        live_labels = await self._live_labels()
         account_summaries = []
         keyboard_buttons = []
         
         for idx, monitor in enumerate(self.monitors):
             label = monitor.account_label
             # Session check
-            session_status = "🟢 Valid" if monitor.session.is_valid else "🔴 Invalid"
+            session_status = live_labels[idx]
             stats = monitor.client.get_stats()
             locked = stats.get('slots_locked_today', 0)
             limit = stats.get('daily_limit', 3)
@@ -906,12 +918,13 @@ To edit these values or update your credentials, use the following commands:
     async def _render_status_summary(self, query) -> None:
         scheduler_health = "🟢 Active" if any(s._running for s in self.schedulers) else "🔴 Paused"
         
+        live_labels = await self._live_labels()
         account_summaries = []
         keyboard_buttons = []
         
         for idx, monitor in enumerate(self.monitors):
             label = monitor.account_label
-            session_status = "🟢 Valid" if monitor.session.is_valid else "🔴 Invalid"
+            session_status = live_labels[idx]
             stats = monitor.client.get_stats()
             locked = stats.get('slots_locked_today', 0)
             limit = stats.get('daily_limit', 3)

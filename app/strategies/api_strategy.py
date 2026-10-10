@@ -131,6 +131,7 @@ class APIStrategy(BaseStrategy):
                                 continue
                             else:
                                 # Refresh failed — raise immediately so callers can handle it cleanly.
+                                self.session.mark_auth_failed()
                                 raise AuthError(f"Session expired and refresh failed (HTTP {response.status}): {text_data[:200]}")
                         else:
                             # Permission/business 403 — return it as-is; caller decides what to do.
@@ -141,6 +142,9 @@ class APIStrategy(BaseStrategy):
                                 url=url,
                                 body=text_data[:300],
                             )
+                    # /auth/* returns 200 with {} for logged-out sessions, so it proves nothing.
+                    if response.status < 400 and "/auth/" not in url:
+                        self.session.mark_auth_ok()
                     return response.status, json_data, text_data, dict(response.headers)
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 self.logger.warning("api.request_error", method=method, url=url, error=repr(e))

@@ -5,6 +5,7 @@ Supports three auth methods:
 2. Session Cookie — fallback for cookie-based auth
 3. Playwright Storage State — full browser session persistence
 """
+import hashlib
 import json
 import os
 from typing import Optional, Dict, Any
@@ -31,6 +32,8 @@ class SessionManager:
         self._cookie: Optional[str] = None
         self._expires_at: Optional[datetime] = None
         self._account_name: str = "default"
+        # Set by the API layer when a request got 401 and refresh could not recover.
+        self.auth_failed: bool = False
 
         if account is not None:
             self._token = account.api_token
@@ -39,11 +42,75 @@ class SessionManager:
             self._storage_state_path = account.resolved_storage_path
             self._account_name = account.name
             self._account_config = account
+            self._apply_env_cookie_override()
         else:
             self._storage_state_path = settings.arcadia_storage_state_path
             self._account_config = None
 
         self._load_session()
+
+    def _apply_env_cookie_override(self) -> None:
+        """Let a changed ACCOUNTS cookie beat a stale saved session (multi-account).
+
+        The rolling session saved in data/auth_<name>.json normally wins over the
+        env cookie. If the env cookie for this account changed since the last boot
+        (e.g. you pasted a fresh one into Railway), drop the saved file so the new
+        cookie is used. With no previous record we only record the hash and keep
+        the saved file, so enabling this never discards a working session.
+        """
+        env_cookie = self._cookie
+        if not env_cookie:
+            return
+        digest = hashlib.sha256(env_cookie.encode("utf-8")).hexdigest()
+        safe_name = self._account_name.lower().replace(" ", "_")
+        marker = os.path.join(os.path.dirname(self._storage_state_path), f"last_env_cookie_{safe_name}.sha256")
+        try:
+            previous = None
+            if os.path.exists(marker):
+                with open(marker, "r", encoding="utf-8") as f:
+                    previous = f.read().strip()
+            if previous == digest:
+                return
+            if previous is not None and os.path.exists(self._storage_state_path):
+                os.remove(self._storage_state_path)
+                logger.info("session.env_cookie_changed_dropped_storage", account=self._account_name)
+            os.makedirs(os.path.dirname(marker), exist_ok=True)
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write(digest)
+        except Exception as e:
+            logger.warning("session.env_override_check_failed", account=self._account_name, error=str(e))
+
+    def mark_auth_failed(self) -> None:
+        self.auth_failed = True
+
+    def mark_auth_ok(self) -> None:
+        self.auth_failed = False
+
+    async def check_live_session(self) -> str:
+        """Ask Arcadia whether this account's session is accepted right now.
+
+        Returns "live", "expired", or "unknown" (network error / unexpected reply).
+        Does not touch cookies or retry; it is a read-only probe.
+        """
+        if not (self._cookie or self._token):
+            return "expired"
+        import httpx
+        headers = dict(self.headers)
+        headers.pop("Accept-Encoding", None)  # let httpx negotiate what it can decode
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{settings.arcadia_api_base}/auth/session", headers=headers)
+        except Exception:
+            return "unknown"
+        if resp.status_code in (401, 403):
+            return "expired"
+        if resp.status_code != 200:
+            return "unknown"
+        try:
+            data = resp.json()
+        except Exception:
+            return "unknown"
+        return "live" if isinstance(data, dict) and data.get("user") else "expired"
 
     def _load_session(self) -> None:
         """Load existing session from env or storage file."""

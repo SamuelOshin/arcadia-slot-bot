@@ -103,6 +103,26 @@ Please run the setup script to re-authenticate:
 
         await self._send_all(message, priority=True)
 
+    async def notify_account_session_dead(self, account: str) -> None:
+        """Alert that one account's session was rejected and could not be refreshed."""
+        if not settings.notification_on_error:
+            return
+        import html
+        name = html.escape(account)
+        await self._send_all(
+            f"🔐 <b>Session Dead — {name}</b>\n\n"
+            f"Arcadia is rejecting this account's session (401) and auto-refresh failed. "
+            f"It cannot see or lock campaigns until fixed.\n\n"
+            f"Send a fresh cookie: <code>/set_cookie {name} &lt;cookie&gt;</code>",
+            priority=True,
+        )
+
+    async def notify_account_session_recovered(self, account: str) -> None:
+        if not settings.notification_on_error:
+            return
+        import html
+        await self._send_all(f"✅ <b>Session Recovered — {html.escape(account)}</b>\n\nThis account is authenticated again.")
+
     async def _send_all(self, message: str, priority: bool = False) -> None:
         """Send to all configured channels concurrently."""
         tasks = []
