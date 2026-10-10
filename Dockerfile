@@ -17,7 +17,7 @@ RUN npm run build
 # -----------------------------------------------------------
 # Stage 2: Final Production Application Runner (Python Environment)
 # -----------------------------------------------------------
-FROM python:3.12-slim AS runner
+FROM python:3.14-slim AS runner
 
 # Install uv package manager
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -30,7 +30,9 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Install Python dependencies
-COPY pyproject.toml uv.lock ./
+# .python-version pins the interpreter so uv uses the base image's Python
+# instead of downloading a newer one (which has no prebuilt wheels).
+COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --frozen --no-install-project
 
 # Add virtualenv to PATH
