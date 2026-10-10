@@ -30,6 +30,7 @@ class BotScheduler:
         self.monitor = monitors[0] if monitors else None
         self.scheduler = AsyncIOScheduler()
         self._running = False
+        self._paused = False
         # Per-monitor interval tracking — avoids one account overwriting another's state.
         self.current_intervals: dict[str, int] = {
             m.account_label: settings.poll_interval_seconds for m in monitors
@@ -90,18 +91,43 @@ class BotScheduler:
         self._running = False
         logger.info("scheduler.stopped")
 
+    def set_interval(self, seconds: int) -> None:
+        """Apply a new poll interval to every account's poll job."""
+        self.current_interval = seconds
+        for monitor in self.monitors:
+            self.current_intervals[monitor.account_label] = seconds
+            if self._running:
+                safe_label = monitor.account_label.lower().replace(" ", "_")
+                self.scheduler.reschedule_job(
+                    f"poll_campaigns_{safe_label}",
+                    trigger=IntervalTrigger(seconds=seconds),
+                )
+        logger.info("scheduler.interval_set", seconds=seconds)
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
     def pause(self) -> None:
-        """Pause all scheduler jobs."""
-        self.scheduler.pause()
+        """Pause polling. Jobs stay registered so resume() always works."""
+        self._paused = True
+        if self._running:
+            self.scheduler.pause()
         logger.info("scheduler.paused")
 
     def resume(self) -> None:
-        """Resume all scheduler jobs."""
-        self.scheduler.resume()
+        """Resume polling after pause()."""
+        self._paused = False
+        if self._running:
+            self.scheduler.resume()
+        else:
+            self.start()
         logger.info("scheduler.resumed")
 
     def _make_poll_job(self, monitor: CampaignMonitor):
         async def _poll_campaigns() -> None:
+            if self._paused:
+                return
             try:
                 logger.debug("scheduler.poll_start", account=monitor.account_label)
                 # Hard timeout: if a poll cycle hangs, cancel it rather

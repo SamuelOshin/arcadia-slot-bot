@@ -135,3 +135,30 @@ class BotConfig(BaseSettings):
 
 # Singleton config instance
 settings = BotConfig()
+
+
+def persist_env_var(key: str, value: str, env_path: str = ".env") -> None:
+    """Write KEY=value into the .env file (best effort; ephemeral on Railway)."""
+    import os
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    for i, line in enumerate(lines):
+        if line.startswith(f"{key}="):
+            lines[i] = f"{key}={value}\n"
+            break
+    else:
+        lines.append(f"\n{key}={value}\n")
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+def set_auto_lock(enabled: bool) -> bool:
+    """Single source of truth for toggling auto-lock at runtime (dashboard + Telegram)."""
+    settings.auto_lock_enabled = enabled
+    try:
+        persist_env_var("AUTO_LOCK_ENABLED", str(enabled).lower())
+    except Exception:
+        pass
+    return enabled

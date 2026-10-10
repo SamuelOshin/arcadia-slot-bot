@@ -23,7 +23,7 @@ from telegram.ext import (
 )
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.config import settings
+from app.config import settings, set_auto_lock
 from app.models import CampaignFilter
 from app.services.campaign_monitor import CampaignMonitor
 from app.core.scheduler import BotScheduler
@@ -248,7 +248,7 @@ class TelegramBotService:
 
     async def show_status(self, update: Update) -> None:
         """Helper to generate summary status message with interactive account navigation."""
-        scheduler_health = "🟢 Active" if any(s._running for s in self.schedulers) else "🔴 Paused"
+        scheduler_health = "🟢 Active" if any(s._running and not s.paused for s in self.schedulers) else "🔴 Paused"
         
         # Build summary lines for all accounts
         account_summaries = []
@@ -434,8 +434,9 @@ To edit these values or update your credentials, use the following commands:
         if not await self.is_authorized(update):
             await update.message.reply_text("❌ Unauthorized.")
             return
-        if self.scheduler._running:
-            self.scheduler.stop()
+        if not self.scheduler.paused:
+            for s in self.schedulers:
+                s.pause()
             await update.message.reply_text("⏸️ Scheduler paused.")
         else:
             await update.message.reply_text("⚠️ Scheduler is already paused.")
@@ -444,8 +445,9 @@ To edit these values or update your credentials, use the following commands:
         if not await self.is_authorized(update):
             await update.message.reply_text("❌ Unauthorized.")
             return
-        if not self.scheduler._running:
-            self.scheduler.start()
+        if self.scheduler.paused:
+            for s in self.schedulers:
+                s.resume()
             await update.message.reply_text("▶️ Scheduler resumed.")
         else:
             await update.message.reply_text("⚠️ Scheduler is already running.")
@@ -565,19 +567,15 @@ To edit these values or update your credentials, use the following commands:
 
         try:
             seconds = int(context.args[0])
-            if seconds < 5:
-                await update.message.reply_text("⚠️ Polling interval must be at least 5 seconds for safety.")
+            if seconds < 2:
+                await update.message.reply_text("⚠️ Polling interval must be at least 2 seconds for safety.")
                 return
                 
             self.update_env_var("POLL_INTERVAL_SECONDS", str(seconds))
             settings.poll_interval_seconds = seconds
             
-            if self.scheduler._running:
-                self.scheduler.scheduler.reschedule_job(
-                    "poll_campaigns",
-                    trigger=IntervalTrigger(seconds=seconds)
-                )
-                self.scheduler.current_interval = seconds
+            for s in self.schedulers:
+                s.set_interval(seconds)
                 
             await update.message.reply_text(f"✅ Poll interval updated to <b>{seconds}s</b> and scheduler rescheduled.", parse_mode="HTML")
         except ValueError:
@@ -832,14 +830,14 @@ To edit these values or update your credentials, use the following commands:
                 await query.message.reply_text(f"❌ Check failed: {str(e)}")
                 
         elif data == "toggle_scheduler":
-            all_running = any(s._running for s in self.schedulers)
+            all_running = any(not s.paused for s in self.schedulers)
             if all_running:
                 for s in self.schedulers:
-                    s.stop()
+                    s.pause()
                 await query.message.reply_text("⏸️ Schedulers paused.")
             else:
                 for s in self.schedulers:
-                    s.start()
+                    s.resume()
                 await query.message.reply_text("▶️ Schedulers resumed.")
             # Go back/refresh the status view if possible
             try:
@@ -848,8 +846,7 @@ To edit these values or update your credentials, use the following commands:
                 pass
                 
         elif data == "toggle_autolock":
-            settings.auto_lock_enabled = not settings.auto_lock_enabled
-            self.update_env_var("AUTO_LOCK_ENABLED", str(settings.auto_lock_enabled).lower())
+            set_auto_lock(not settings.auto_lock_enabled)
             status = "ENABLED ✅" if settings.auto_lock_enabled else "DISABLED ❌"
             await query.message.reply_text(f"⚙️ Auto-Lock is now <b>{status}</b>.", parse_mode="HTML")
             

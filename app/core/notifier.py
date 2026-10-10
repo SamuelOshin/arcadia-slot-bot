@@ -135,7 +135,9 @@ Please run the setup script to re-authenticate:
         }
 
         response = await self._http.post(url, json=payload)
-        response.raise_for_status()
+        if response.status_code >= 400:
+            # Surface Telegram's reason (e.g. "can't parse entities") instead of a bare status code.
+            raise RuntimeError(f"Telegram {response.status_code}: {response.text[:300]}")
 
     async def _send_discord(self, message: str) -> None:
         """Send message via Discord webhook."""

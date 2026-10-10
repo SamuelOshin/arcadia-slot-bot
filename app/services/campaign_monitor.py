@@ -2,6 +2,7 @@
 
 Polls for new campaigns, detects drops, and triggers locks.
 """
+import html
 import json
 import os
 import asyncio
@@ -136,13 +137,13 @@ class CampaignMonitor:
 
         lines = []
 
-        label_suffix = f" [{self.account_label}]" if self.account_label != "default" else ""
+        label_suffix = f" [{html.escape(self.account_label)}]" if self.account_label != "default" else ""
 
         if succeeded > 0:
             lines.append(f"⚡ <b>Auto-Lock Successful!{label_suffix}</b> 🎉")
             lines.append("──────────────────")
             for attempt in succeeded_attempts:
-                lines.append(f"🎯 <b>{attempt.get('campaign_title')}</b>")
+                lines.append(f"🎯 <b>{html.escape(str(attempt.get('campaign_title')))}</b>")
                 lines.append(f"💰 <b>Payout:</b> ${attempt.get('payout')}/{attempt.get('payout_unit')}")
                 lines.append(f"⏱️ <b>Speed:</b> {attempt.get('response_time_ms', 0):.0f}ms")
                 if attempt.get("slot_number"):
@@ -156,15 +157,15 @@ class CampaignMonitor:
                     if msg == "taken" or "conflict" in msg.lower() or "taken" in msg.lower():
                         reason = "taken (collision)"
                     else:
-                        reason = msg
-                    lines.append(f"• <b>{attempt.get('campaign_title')}</b>: {reason} ({attempt.get('response_time_ms', 0):.0f}ms)")
+                        reason = html.escape(str(msg))
+                    lines.append(f"• <b>{html.escape(str(attempt.get('campaign_title')))}</b>: {reason} ({attempt.get('response_time_ms', 0):.0f}ms)")
                 lines.append("──────────────────")
         else:
             # Succeeded == 0, meaning all attempts failed
             lines.append(f"⚠️ <b>Auto-Lock Missed{label_suffix}</b>")
             lines.append("──────────────────")
             for attempt in failed_attempts:
-                lines.append(f"🎯 <b>{attempt.get('campaign_title')}</b>")
+                lines.append(f"🎯 <b>{html.escape(str(attempt.get('campaign_title')))}</b>")
                 lines.append(f"💰 <b>Payout:</b> ${attempt.get('payout')}/{attempt.get('payout_unit')}")
                 lines.append(f"⏱️ <b>Speed:</b> {attempt.get('response_time_ms', 0):.0f}ms")
                 
@@ -172,7 +173,7 @@ class CampaignMonitor:
                 if msg == "taken" or "conflict" in msg.lower() or "taken" in msg.lower():
                     reason = "taken (collision)"
                 else:
-                    reason = msg
+                    reason = html.escape(str(msg))
                 lines.append(f"❌ <b>Reason:</b> {reason}")
                 lines.append("──────────────────")
 
@@ -184,7 +185,7 @@ class CampaignMonitor:
         rejections = summary.get("filter_rejections", {})
         filter_parts = []
         for reason, count in sorted(rejections.items(), key=lambda x: -x[1]):
-            filter_parts.append(f"{count} {reason}")
+            filter_parts.append(f"{count} {html.escape(str(reason))}")
         filter_str = ", ".join(filter_parts[:3])
         if len(filter_parts) > 3:
             filter_str += f" +{len(filter_parts)-3} more"
@@ -192,14 +193,12 @@ class CampaignMonitor:
             lines.append(f"  └ {filter_str}")
 
         message = "\n".join(lines)
-        try:
-            await self.notifier._send_telegram(
-                chat_id=settings.telegram_chat_id.split(",")[0].strip(),
-                message=message,
-            )
-            self.logger.info("monitor.autolock_summary_sent", summary=summary)
-        except Exception as e:
-            self.logger.error("monitor.autolock_summary_failed", error=str(e))
+        for chat_id in [x.strip() for x in settings.telegram_chat_id.split(",") if x.strip()]:
+            try:
+                await self.notifier._send_telegram(chat_id=chat_id, message=message)
+                self.logger.info("monitor.autolock_summary_sent", chat_id=chat_id, succeeded=succeeded)
+            except Exception as e:
+                self.logger.error("monitor.autolock_summary_failed", chat_id=chat_id, error=str(e))
 
     async def check_and_lock(self) -> int:
         """Main monitoring loop — check campaigns, act, and return next poll interval."""
